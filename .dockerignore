@@ -1,0 +1,12 @@
+**/.next
+**/dist
+**/node_modules
+**/.env
+**/.env.local
+**/coverage
+.git
+.gitignore
+database
+docs
+frontend
+*.log

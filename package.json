@@ -1,0 +1,37 @@
+{
+  "name": "restaurante-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monorepo base para un sistema de restaurante.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces --if-present",
+    "dev:api": "npm run dev -w @restaurante/api",
+    "dev:web": "npm run dev -w @restaurante/web -- --port 3000",
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "prisma:generate": "npm run prisma:generate -w @restaurante/api",
+    "prisma:migrate": "npm run prisma:migrate -w @restaurante/api",
+    "prisma:studio": "npm run prisma:studio -w @restaurante/api",
+    "prisma:seed": "npm run prisma:seed -w @restaurante/api",
+    "db:reset": "npm run db:reset -w @restaurante/api",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md,css}\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript-eslint": "^8.18.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  }
+}

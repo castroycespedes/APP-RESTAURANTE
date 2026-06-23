@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-label="POS Restaurante">
+  <rect width="192" height="192" rx="38" fill="#0f766e"/>
+  <circle cx="96" cy="84" r="48" fill="#ffffff"/>
+  <path d="M56 92h80c-3 29-19 45-40 45S59 121 56 92Z" fill="#d97706"/>
+  <path d="M72 62h48M68 78h56" stroke="#0f766e" stroke-width="10" stroke-linecap="round"/>
+  <rect x="52" y="142" width="88" height="14" rx="7" fill="#ffffff"/>
+</svg>

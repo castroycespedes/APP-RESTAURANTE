@@ -1,0 +1,10 @@
+export const TABLE_STATUS_VALUES = [
+  'AVAILABLE',
+  'OCCUPIED',
+  'RESERVED',
+  'CLEANING',
+  'BLOCKED',
+  'WAITING_KITCHEN',
+  'READY_TO_SERVE',
+  'WAITING_PAYMENT'
+] as const;
