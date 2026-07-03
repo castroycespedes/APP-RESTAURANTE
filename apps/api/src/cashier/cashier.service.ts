@@ -1,7 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { CashRegisterStatus, DiscountType, OrderStatus, PaymentMethod, Prisma, TableStatus, UserRole } from '@prisma/client';
+import { CashRegisterStatus, DiscountType, KitchenTicketStatus, OrderItemStatus, OrderStatus, PaymentMethod, Prisma, TableStatus, UserRole } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import type { AuthUser } from '../auth/auth.types';
+import type { AddOrderItemDto, AddOrderItemModifierDto } from '../orders/dto/add-order-item.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import type { ApplyDiscountDto } from './dto/apply-discount.dto';
 import type { CloseCashRegisterDto } from './dto/close-cash-register.dto';
@@ -25,7 +26,13 @@ const cashierOrderInclude = {
       id: true,
       name: true,
       number: true,
-      status: true
+      capacity: true,
+      status: true,
+      diningArea: {
+        select: {
+          name: true
+        }
+      }
     }
   },
   waiter: {
@@ -81,17 +88,235 @@ export class CashierService {
       orderBy: { createdAt: 'desc' }
     });
 
-    return Promise.all(orders.map((order) => this.updateOrderFinancials(order.id)));
+    return this.attachReservationsToOrders(await Promise.all(orders.map((order) => this.updateOrderFinancials(order.id))));
   }
 
   async pendingTables() {
     const orders = await this.prisma.order.findMany({
-      where: { status: OrderStatus.WAITING_PAYMENT },
+      where: {
+        status: { notIn: [OrderStatus.PAID, OrderStatus.CLOSED, OrderStatus.CANCELLED] },
+        OR: [
+          { status: OrderStatus.WAITING_PAYMENT },
+          { table: { status: TableStatus.WAITING_PAYMENT } }
+        ]
+      },
       include: cashierOrderInclude,
       orderBy: { createdAt: 'desc' }
     });
 
-    return Promise.all(orders.map((order) => this.updateOrderFinancials(order.id)));
+    return this.attachReservationsToOrders(await Promise.all(orders.map((order) => this.updateOrderFinancials(order.id))));
+  }
+
+  async reservedTablesOverview() {
+    const tables = await this.prisma.restaurantTable.findMany({
+      where: {
+        isActive: true,
+        status: TableStatus.RESERVED
+      },
+      select: {
+        id: true,
+        name: true,
+        number: true,
+        capacity: true,
+        status: true,
+        diningArea: {
+          select: {
+            name: true
+          }
+        }
+      },
+      orderBy: [{ number: 'asc' }]
+    });
+
+    return this.attachReservationDetails(tables);
+  }
+
+  async reservableTablesOverview() {
+    const tables = await this.prisma.restaurantTable.findMany({
+      where: {
+        isActive: true,
+        status: { in: [TableStatus.AVAILABLE, TableStatus.RESERVED] }
+      },
+      select: {
+        id: true,
+        name: true,
+        number: true,
+        capacity: true,
+        status: true,
+        diningArea: {
+          select: {
+            name: true
+          }
+        }
+      },
+      orderBy: [{ number: 'asc' }]
+    });
+
+    return this.attachReservationDetails(tables);
+  }
+
+  async reserveTableFromCashier(dto: {
+    tableId: string;
+    firstName: string;
+    lastName?: string;
+    phone?: string;
+    email?: string;
+    guestCount?: number;
+    depositAmount?: number;
+    reservationDate?: string;
+    notes?: string;
+  }, actor: AuthUser) {
+    if (!dto.tableId || !dto.firstName?.trim()) {
+      throw new BadRequestException('Selecciona una mesa y registra el nombre del cliente.');
+    }
+
+    const table = await this.prisma.restaurantTable.findUnique({ where: { id: dto.tableId } });
+
+    if (!table || !table.isActive) {
+      throw new NotFoundException('Mesa no encontrada.');
+    }
+
+    if (table.status !== TableStatus.AVAILABLE && table.status !== TableStatus.RESERVED) {
+      throw new ConflictException('Solo se pueden reservar mesas disponibles o ya reservadas.');
+    }
+
+    const reservationNote = [
+      `Reserva caja mesa ${table.number}`,
+      dto.reservationDate ? `Fecha: ${dto.reservationDate}` : '',
+      dto.guestCount ? `Personas: ${dto.guestCount}` : '',
+      dto.depositAmount ? `Abono: ${dto.depositAmount}` : 'Abono: 0',
+      dto.notes ? `Nota: ${dto.notes}` : ''
+    ].filter(Boolean).join(' | ');
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const customer = await tx.customer.create({
+        data: {
+          firstName: dto.firstName,
+          lastName: dto.lastName,
+          phone: dto.phone,
+          email: dto.email,
+          notes: reservationNote
+        }
+      });
+
+      const reservedTable = await tx.restaurantTable.update({
+        where: { id: dto.tableId },
+        data: { status: TableStatus.RESERVED },
+        select: {
+          id: true,
+          name: true,
+          number: true,
+          capacity: true,
+          status: true,
+          diningArea: { select: { name: true } }
+        }
+      });
+
+      return { customer, table: reservedTable };
+    });
+
+    await this.auditService.log({
+      userId: actor.id,
+      action: 'cashier.table.reserve',
+      entity: 'RestaurantTable',
+      entityId: dto.tableId,
+      before: { status: table.status },
+      after: { status: TableStatus.RESERVED, customerId: result.customer.id },
+      metadata: { reservationNote, depositAmount: dto.depositAmount ?? 0 }
+    });
+
+    return result;
+  }
+
+  private async attachReservationDetails(tables: Array<{ number: string } & Record<string, any>>): Promise<any[]> {
+    if (tables.length === 0) {
+      return [];
+    }
+
+    const customers = await this.prisma.customer.findMany({
+      where: {
+        isActive: true,
+        notes: { contains: 'Reserva caja mesa' }
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        phone: true,
+        notes: true,
+        createdAt: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return tables.map((table) => {
+      const customer = customers.find((item) => item.notes?.split('|')[0]?.trim() === `Reserva caja mesa ${table.number}`);
+      const reservation = customer ? this.parseReservationCustomer(customer) : null;
+
+      return { ...table, reservation };
+    });
+  }
+
+  private parseReservationCustomer(customer: {
+    id: string;
+    firstName: string;
+    lastName: string | null;
+    email: string | null;
+    phone: string | null;
+    notes: string | null;
+    createdAt: Date;
+  }) {
+    const parts = (customer.notes ?? '').split('|').map((part) => part.trim());
+    const readValue = (label: string) => {
+      const part = parts.find((item) => item.startsWith(`${label}:`));
+      return part ? part.slice(label.length + 1).trim() : '';
+    };
+
+    return {
+      customerId: customer.id,
+      customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
+      depositAmount: Number(readValue('Abono') || 0),
+      email: customer.email,
+      guestCount: Number(readValue('Personas') || 0) || null,
+      notes: readValue('Nota'),
+      phone: customer.phone,
+      registeredAt: customer.createdAt,
+      reservationDate: readValue('Fecha')
+    };
+  }
+
+  private async attachReservationsToOrders(orders: Array<{ table: { number: string } } & Record<string, any>>): Promise<any[]> {
+    if (orders.length === 0) {
+      return [];
+    }
+
+    const tables = orders.map((order) => order.table);
+    const tablesWithReservations = await this.attachReservationDetails(tables);
+
+    return orders.map((order) => {
+      const tableWithReservation = tablesWithReservations.find((table) => table.number === order.table.number);
+
+      return {
+        ...order,
+        table: {
+          ...order.table,
+          reservation: tableWithReservation?.reservation ?? null
+        }
+      };
+    });
+  }
+
+  private async reservationForTableNumber(tableNumber: string) {
+    const [table] = await this.attachReservationDetails([{ number: tableNumber }]);
+
+    return table?.reservation ?? null;
+  }
+
+  private activeReservationDiscount(order: { discounts?: Array<{ isActive: boolean; name: string; type: DiscountType; value: Prisma.Decimal | number | string }> }, subtotal: number) {
+    return (order.discounts ?? [])
+      .filter((discount) => discount.isActive && discount.name === 'Abono reserva')
+      .reduce((sum, discount) => sum + this.calculateDiscountAmount(subtotal, discount.type, Number(discount.value)), 0);
   }
 
   async findCashierConfig() {
@@ -115,7 +340,7 @@ export class CashierService {
       this.getBooleanSetting('print_receipt_after_payment', true),
       this.getBooleanSetting('show_tip_on_receipt', true),
       this.getBooleanSetting('allow_custom_tip', true),
-      this.getBooleanSetting('allow_cashier_request_payment', true),
+      this.getBooleanSetting('allow_cashier_request_payment', false),
       this.getAfterPaymentTableStatus()
     ]);
 
@@ -275,7 +500,7 @@ export class CashierService {
     return discount;
   }
 
-  async findOrder(orderId: string) {
+  async findOrder(orderId: string): Promise<any> {
     const order = await this.updateOrderFinancials(orderId);
 
     if (!order) {
@@ -431,11 +656,175 @@ export class CashierService {
       metadata: { reason: dto.reason, discountAmount }
     });
 
-    return result.updatedOrder;
+    return (await this.attachReservationsToOrders([result.updatedOrder]))[0];
   }
 
   async requestPaymentFromCashier(orderId: string, actor: AuthUser) {
     return this.markWaitingPaymentOrder(orderId, actor, 'cashier.order.request-payment');
+  }
+
+  async addLastMinuteItem(orderId: string, dto: AddOrderItemDto, actor: AuthUser) {
+    const order = await this.findOrder(orderId);
+
+    if (order.status === OrderStatus.PAID || order.status === OrderStatus.CLOSED || order.status === OrderStatus.CANCELLED) {
+      throw new ConflictException('Esta cuenta ya no permite adicionar productos.');
+    }
+
+    const menuItem = await this.prisma.menuItem.findUnique({ where: { id: dto.menuItemId } });
+
+    if (!menuItem || !menuItem.isActive || !menuItem.isAvailable) {
+      throw new NotFoundException('Producto disponible no encontrado.');
+    }
+
+    const modifierPayload = await this.buildLastMinuteModifierPayload(dto.menuItemId, dto.modifiers ?? []);
+    const modifierTotal = modifierPayload.reduce((sum, modifier) => sum + Number(modifier.priceDelta) * modifier.quantity, 0);
+    const lineTotal = new Prisma.Decimal((Number(menuItem.price) + modifierTotal) * dto.quantity);
+
+    await this.prisma.orderItem.create({
+      data: {
+        orderId,
+        menuItemId: dto.menuItemId,
+        quantity: dto.quantity,
+        unitPrice: menuItem.price,
+        total: lineTotal,
+        status: OrderItemStatus.SERVED,
+        notes: dto.notes ? `Agregado en caja: ${dto.notes}` : 'Agregado en caja antes del cobro',
+        modifiers: { create: modifierPayload }
+      }
+    });
+
+    const items = await this.prisma.orderItem.findMany({
+      where: { orderId, status: { not: OrderItemStatus.CANCELLED } }
+    });
+    const subtotal = items.reduce((sum, item) => sum + Number(item.total), 0);
+
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: { subtotal: new Prisma.Decimal(subtotal) }
+    });
+
+    await this.auditService.log({
+      userId: actor.id,
+      action: 'cashier.order.add-last-minute-item',
+      entity: 'Order',
+      entityId: orderId,
+      after: { menuItemId: dto.menuItemId, quantity: dto.quantity, total: lineTotal },
+      metadata: { source: 'cashier' }
+    });
+
+    return this.updateOrderFinancials(orderId);
+  }
+
+  async releaseEmptyOrder(orderId: string, reason: string, actor: AuthUser) {
+    const order = await this.findOrder(orderId);
+    const activeItems = order.items.filter((item: any) => item.status !== OrderItemStatus.CANCELLED);
+
+    if (activeItems.length > 0) {
+      throw new ConflictException('Esta mesa tiene productos registrados. Debe cobrarse o cancelarse con autorizacion.');
+    }
+
+    if (!reason?.trim()) {
+      throw new ConflictException('Debes registrar una nota para liberar una mesa sin consumo.');
+    }
+
+    const updatedOrder = await this.prisma.$transaction(async (tx) => {
+      await tx.restaurantTable.update({
+        where: { id: order.tableId },
+        data: { status: TableStatus.AVAILABLE }
+      });
+
+      return tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.CANCELLED,
+          cancelledAt: new Date(),
+          cancellationReason: reason
+        },
+        include: cashierOrderInclude
+      });
+    });
+
+    await this.auditService.log({
+      userId: actor.id,
+      action: 'cashier.order.release-empty',
+      entity: 'Order',
+      entityId: orderId,
+      before: { status: order.status, tableStatus: order.table.status },
+      after: { status: OrderStatus.CANCELLED, tableStatus: TableStatus.AVAILABLE },
+      metadata: { reason }
+    });
+
+    return updatedOrder;
+  }
+
+  async cancelAuthorizedOrder(orderId: string, reason: string, authorizedBy: string, actor: AuthUser) {
+    const order = await this.findOrder(orderId);
+
+    if (order.status === OrderStatus.PAID || order.status === OrderStatus.CLOSED || order.status === OrderStatus.CANCELLED) {
+      throw new ConflictException('Esta factura o pedido ya no se puede eliminar desde caja.');
+    }
+
+    if (!reason?.trim()) {
+      throw new ConflictException('Debes registrar el motivo para eliminar el pedido.');
+    }
+
+    if (!authorizedBy?.trim()) {
+      throw new ConflictException('Debes registrar el nombre de quien autoriza la eliminacion.');
+    }
+
+    const activeItems = order.items.filter((item: any) => item.status !== OrderItemStatus.CANCELLED);
+    const cancelledAt = new Date();
+    const cancellationReason = `Caja autorizada por ${authorizedBy.trim()}: ${reason.trim()}`;
+
+    const cancelledOrder = await this.prisma.$transaction(async (tx) => {
+      await tx.orderItem.updateMany({
+        where: {
+          orderId,
+          status: { not: OrderItemStatus.CANCELLED }
+        },
+        data: {
+          cancelledAt,
+          status: OrderItemStatus.CANCELLED
+        }
+      });
+
+      await tx.kitchenTicket.updateMany({
+        where: { orderId },
+        data: { status: KitchenTicketStatus.CANCELLED }
+      });
+
+      await tx.restaurantTable.update({
+        where: { id: order.tableId },
+        data: { status: TableStatus.AVAILABLE }
+      });
+
+      return tx.order.update({
+        where: { id: orderId },
+        data: {
+          cancelledAt,
+          cancellationReason,
+          status: OrderStatus.CANCELLED
+        },
+        include: cashierOrderInclude
+      });
+    });
+
+    await this.auditService.log({
+      userId: actor.id,
+      action: 'cashier.order.cancel-authorized',
+      entity: 'Order',
+      entityId: orderId,
+      before: { status: order.status, tableStatus: order.table.status },
+      after: {
+        authorizedBy: authorizedBy.trim(),
+        cancelledItemIds: activeItems.map((item: any) => item.id),
+        reason: reason.trim(),
+        status: OrderStatus.CANCELLED,
+        tableStatus: TableStatus.AVAILABLE
+      }
+    });
+
+    return cancelledOrder;
   }
 
   async markWaitingPaymentFromCashier(orderId: string, actor: AuthUser) {
@@ -449,7 +838,7 @@ export class CashierService {
   }
 
   private async markWaitingPaymentOrder(orderId: string, actor: AuthUser, auditAction: string) {
-    const isAllowedByConfig = await this.getBooleanSetting('allow_cashier_request_payment', true);
+    const isAllowedByConfig = await this.getBooleanSetting('allow_cashier_request_payment', false);
 
     if (!isAllowedByConfig) {
       throw new ConflictException('La configuracion no permite pasar cuentas a cobro desde caja.');
@@ -556,8 +945,7 @@ export class CashierService {
       const isFullyPaid = paidTotal >= nextTotal;
 
       if (isFullyPaid) {
-        const configuredTableStatus = await this.getAfterPaymentTableStatus();
-        const closeTableStatus = dto.closeTableStatus ?? (configuredTableStatus as TableStatus);
+        const closeTableStatus = TableStatus.AVAILABLE;
 
         await tx.order.update({
           where: { id: orderId },
@@ -601,7 +989,7 @@ export class CashierService {
           entity: 'Order',
           entityId: orderId,
           before: {
-            paidTotalBefore: order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0),
+            paidTotalBefore: order.payments.reduce((sum: number, payment: any) => sum + Number(payment.amount), 0),
             status: order.status,
             tipTotal: Number(order.tipTotal),
             total: Number(order.total)
@@ -642,12 +1030,10 @@ export class CashierService {
       throw new ConflictException('Esta cuenta ya fue pagada.');
     }
 
-    if (order.status !== OrderStatus.WAITING_PAYMENT) {
-      const canCashierMoveToPayment = await this.getBooleanSetting('allow_cashier_request_payment', true);
+    const isPaymentRequested = order.status === OrderStatus.WAITING_PAYMENT || order.table.status === TableStatus.WAITING_PAYMENT;
 
-      if (!canCashierMoveToPayment) {
-        throw new ForbiddenException('La cuenta aun no fue solicitada por el mesero.');
-      }
+    if (!isPaymentRequested) {
+      throw new ForbiddenException('La cuenta aun no fue solicitada por el mesero.');
     }
 
     if (order.items.length === 0) {
@@ -671,10 +1057,13 @@ export class CashierService {
       throw new ConflictException('Debes abrir caja antes de cobrar.');
     }
 
-    const recalculatedSubtotal = order.items.reduce((sum, item) => sum + Number(item.total), 0);
+    const recalculatedSubtotal = order.items.reduce((sum: number, item: any) => sum + Number(item.total), 0);
     const activeDiscountTotal = order.discounts
-      .filter((discount) => discount.isActive)
-      .reduce((sum, discount) => sum + this.calculateDiscountAmount(recalculatedSubtotal, discount.type, Number(discount.value)), 0);
+      .filter((discount: any) => discount.isActive)
+      .reduce((sum: number, discount: any) => sum + this.calculateDiscountAmount(recalculatedSubtotal, discount.type, Number(discount.value)), 0);
+    const reservation = await this.reservationForTableNumber(order.table.number);
+    const existingReservationDiscountAmount = this.activeReservationDiscount(order, recalculatedSubtotal);
+    const reservationDepositAmount = Math.max(0, Number(reservation?.depositAmount ?? 0));
     const checkoutDiscount = dto.discount?.type && Number(dto.discount.value ?? 0) > 0
       ? this.normalizeDiscountInput(dto.discount.type, Number(dto.discount.value ?? 0))
       : null;
@@ -686,25 +1075,27 @@ export class CashierService {
       await this.ensureDiscountAllowed(actor.role, checkoutDiscount.type, checkoutDiscount.value, checkoutDiscountAmount);
     }
 
-    const discountTotal = activeDiscountTotal + checkoutDiscountAmount;
+    const reservationDiscountAmount = existingReservationDiscountAmount > 0
+      ? 0
+      : Math.min(reservationDepositAmount, Math.max(0, recalculatedSubtotal - activeDiscountTotal - checkoutDiscountAmount));
+    const discountTotal = activeDiscountTotal + checkoutDiscountAmount + reservationDiscountAmount;
 
     if (discountTotal > recalculatedSubtotal) {
       throw new BadRequestException('El descuento no puede ser mayor al total.');
     }
 
-    const existingPaidTotal = order.payments.reduce((sum, payment) => sum + Number(payment.amount), 0);
+    const existingPaidTotal = order.payments.reduce((sum: number, payment: any) => sum + Number(payment.amount), 0);
     const financialUpdate = await this.buildFinancialUpdate(recalculatedSubtotal, discountTotal, tipAmount);
     const totalFinal = Number(financialUpdate.total);
     const amountDue = Math.max(0, totalFinal - existingPaidTotal);
-    const checkoutPayments = this.normalizeCheckoutPaymentLines(dto, amountDue);
+    const checkoutPayments = amountDue > 0 ? this.normalizeCheckoutPaymentLines(dto, amountDue) : [];
     const paymentTotal = checkoutPayments.reduce((sum, payment) => sum + payment.amount, 0);
 
     if (Math.abs(paymentTotal - amountDue) > 0.01) {
       throw new ConflictException('La suma de los pagos no coincide con el total.');
     }
 
-    const configuredTableStatus = await this.getAfterPaymentTableStatus();
-    const closeTableStatus = dto.closeTableStatus ?? (configuredTableStatus as TableStatus);
+    const closeTableStatus = TableStatus.AVAILABLE;
 
     const result = await this.prisma.$transaction(async (tx) => {
       const closedAt = new Date();
@@ -723,17 +1114,18 @@ export class CashierService {
         await tx.auditLog.create({
           data: {
             userId: actor.id,
-            action: 'MARK_WAITING_PAYMENT_FROM_CASHIER',
+            action: 'cashier.order.sync-waiting-payment',
             entity: 'Order',
             entityId: orderId,
             before: { status: order.status, tableStatus: order.table.status },
             after: { status: OrderStatus.WAITING_PAYMENT, tableStatus: TableStatus.WAITING_PAYMENT },
-            metadata: { reason: 'Cuenta enviada a cobro durante checkout.' }
+            metadata: { reason: 'Sincronizacion de cuenta ya solicitada antes de cobrar.' }
           }
         });
       }
 
       let checkoutDiscountRecord: { id: string } | null = null;
+      let reservationDiscountRecord: { id: string } | null = null;
 
       if (checkoutDiscount) {
         checkoutDiscountRecord = await tx.discount.create({
@@ -743,6 +1135,19 @@ export class CashierService {
             type: checkoutDiscount.type,
             value: checkoutDiscount.value,
             description: 'Aplicado durante cierre de caja'
+          },
+          select: { id: true }
+        });
+      }
+
+      if (reservationDiscountAmount > 0) {
+        reservationDiscountRecord = await tx.discount.create({
+          data: {
+            orderId,
+            name: 'Abono reserva',
+            type: DiscountType.FIXED_AMOUNT,
+            value: reservationDiscountAmount,
+            description: `Saldo a favor de reserva${reservation?.customerName ? ` - ${reservation.customerName}` : ''}`
           },
           select: { id: true }
         });
@@ -805,6 +1210,9 @@ export class CashierService {
             cashRegisterId: cashRegister?.id ?? null,
             checkoutDiscountAmount,
             checkoutDiscountId: checkoutDiscountRecord?.id ?? null,
+            reservationDepositAmount,
+            reservationDiscountAmount,
+            reservationDiscountId: reservationDiscountRecord?.id ?? null,
             paymentTotal
           }
         }
@@ -820,6 +1228,20 @@ export class CashierService {
             before: { discountTotal: Number(order.discountTotal) },
             after: { discountAmount: checkoutDiscountAmount, discountTotal },
             metadata: { reason: 'Descuento aplicado durante checkout.' }
+          }
+        });
+      }
+
+      if (reservationDiscountRecord) {
+        await tx.auditLog.create({
+          data: {
+            userId: actor.id,
+            action: 'cashier.reservation.deposit.apply',
+            entity: 'Discount',
+            entityId: reservationDiscountRecord.id,
+            before: { reservationDepositAmount },
+            after: { discountAmount: reservationDiscountAmount, discountTotal },
+            metadata: { customerName: reservation?.customerName ?? null, tableNumber: order.table.number }
           }
         });
       }
@@ -1013,7 +1435,41 @@ export class CashierService {
     }
   }
 
-  private async updateOrderFinancials(orderId: string) {
+  private async buildLastMinuteModifierPayload(menuItemId: string, modifiers: AddOrderItemModifierDto[]) {
+    if (modifiers.length === 0) {
+      return [];
+    }
+
+    const modifierIds = modifiers.map((modifier) => modifier.modifierId);
+    const records = await this.prisma.menuItemModifier.findMany({
+      where: {
+        id: { in: modifierIds },
+        menuItemId,
+        isActive: true
+      }
+    });
+
+    if (records.length !== new Set(modifierIds).size) {
+      throw new BadRequestException('El adicional seleccionado no aplica para este producto.');
+    }
+
+    return modifiers.map((modifier) => {
+      const record = records.find((item) => item.id === modifier.modifierId);
+
+      if (!record) {
+        throw new BadRequestException('El adicional seleccionado no aplica para este producto.');
+      }
+
+      return {
+        menuItemModifierId: record.id,
+        nameSnapshot: record.name,
+        quantity: modifier.quantity ?? 1,
+        priceDelta: record.priceDelta
+      };
+    });
+  }
+
+  private async updateOrderFinancials(orderId: string): Promise<any> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: cashierOrderInclude
@@ -1033,14 +1489,16 @@ export class CashierService {
       Number(order.taxTotal) !== Number(financialUpdate.taxTotal) ||
       Number(order.total) !== Number(financialUpdate.total)
     ) {
-      return this.prisma.order.update({
+      const updatedOrder = await this.prisma.order.update({
         where: { id: orderId },
         data: financialUpdate,
         include: cashierOrderInclude
       });
+
+      return (await this.attachReservationsToOrders([updatedOrder]))[0];
     }
 
-    return order;
+    return (await this.attachReservationsToOrders([order]))[0];
   }
 
   private async buildFinancialUpdate(subtotal: number, discountTotal: number, tipTotal: number) {
@@ -1091,10 +1549,10 @@ export class CashierService {
 
   private async getAfterPaymentTableStatus() {
     const configuredStatus = await this.getStringSetting('afterPaymentTableStatus', '');
-    const legacyStatus = configuredStatus || (await this.getStringSetting('table_status_after_payment', TableStatus.CLEANING));
+    const legacyStatus = configuredStatus || (await this.getStringSetting('table_status_after_payment', TableStatus.AVAILABLE));
     const allowedStatuses = new Set<string>([TableStatus.AVAILABLE, TableStatus.CLEANING]);
 
-    return allowedStatuses.has(legacyStatus) ? (legacyStatus as Extract<TableStatus, 'AVAILABLE' | 'CLEANING'>) : TableStatus.CLEANING;
+    return allowedStatuses.has(legacyStatus) ? (legacyStatus as Extract<TableStatus, 'AVAILABLE' | 'CLEANING'>) : TableStatus.AVAILABLE;
   }
 
   private async ensureCashRegister(id: string) {

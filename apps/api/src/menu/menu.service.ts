@@ -56,17 +56,48 @@ export class MenuService {
     return this.prisma.menuCategory.findMany({
       where: {
         isActive: true,
-        items: {
-          some: {
-            isActive: true,
-            isAvailable: hideSoldOut ? true : undefined,
-            showForWaiters: true
+        parentId: null,
+        OR: [
+          {
+            items: {
+              some: {
+                isActive: true,
+                isAvailable: hideSoldOut ? true : undefined,
+                showForWaiters: true
+              }
+            }
+          },
+          {
+            children: {
+              some: {
+                isActive: true,
+                items: {
+                  some: {
+                    isActive: true,
+                    isAvailable: hideSoldOut ? true : undefined,
+                    showForWaiters: true
+                  }
+                }
+              }
+            }
           }
-        }
+        ]
       },
       include: {
         children: {
           where: { isActive: true },
+          include: {
+            items: {
+              where: { isActive: true, isAvailable: hideSoldOut ? true : undefined, showForWaiters: true },
+              include: {
+                modifiers: {
+                  where: { isActive: true },
+                  orderBy: { createdAt: 'asc' }
+                }
+              },
+              orderBy: { name: 'asc' }
+            }
+          },
           orderBy: { sortOrder: 'asc' }
         },
         items: {
@@ -82,6 +113,92 @@ export class MenuService {
       },
       orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }]
     });
+  }
+
+  findActiveSubcategories(categoryId: string) {
+    return this.prisma.menuCategory.findMany({
+      where: {
+        parentId: categoryId,
+        isActive: true
+      },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }]
+    });
+  }
+
+  async findAvailableItemsByCategory(categoryId: string) {
+    const hideSoldOut = await this.getBooleanSetting('hide_sold_out_for_waiters', true);
+
+    return this.prisma.menuItem.findMany({
+      where: {
+        categoryId,
+        isActive: true,
+        isAvailable: hideSoldOut ? true : undefined,
+        showForWaiters: true
+      },
+      include: {
+        modifiers: {
+          where: { isActive: true },
+          orderBy: { createdAt: 'asc' }
+        },
+        category: {
+          select: {
+            id: true,
+            name: true,
+            parentId: true
+          }
+        }
+      },
+      orderBy: { name: 'asc' }
+    });
+  }
+
+  async findApplicableModifiers(menuItemId: string) {
+    const item = await this.prisma.menuItem.findUnique({
+      where: { id: menuItemId },
+      include: {
+        category: {
+          select: {
+            id: true,
+            name: true,
+            parentId: true,
+            parent: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
+          }
+        },
+        modifiers: {
+          where: { isActive: true },
+          orderBy: { createdAt: 'asc' }
+        }
+      }
+    });
+
+    if (!item || !item.isActive || !item.showForWaiters) {
+      throw new NotFoundException('Available menu item not found');
+    }
+
+    return {
+      data: item.modifiers.map((modifier) => ({
+        id: modifier.id,
+        menuItemId: modifier.menuItemId,
+        name: modifier.name,
+        price: Number(modifier.priceDelta),
+        isRequired: modifier.isRequired,
+        maxSelections: modifier.maxQuantity,
+        scope: {
+          productId: item.id,
+          productName: item.name,
+          categoryId: item.category.parentId ?? item.category.id,
+          categoryName: item.category.parent?.name ?? item.category.name,
+          subcategoryId: item.category.parentId ? item.category.id : null,
+          subcategoryName: item.category.parentId ? item.category.name : null
+        }
+      })),
+      message: item.modifiers.length === 0 ? 'Este producto no tiene adicionales configurados.' : undefined
+    };
   }
 
   findPublicMenu(showSoldOut = false) {

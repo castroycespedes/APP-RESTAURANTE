@@ -108,6 +108,20 @@ export class TablesController {
     return this.tablesService.updateTableStatus(id, dto, actor.id);
   }
 
+  @Patch('tables/:id/mark-available')
+  @Roles(...TABLE_MANAGERS)
+  @Permissions('tables:manage')
+  markAvailable(@Param('id') id: string, @CurrentUser() actor: AuthUser) {
+    return this.tablesService.markTableAvailable(id, actor.id);
+  }
+
+  @Patch('tables/:id/block')
+  @Roles(...TABLE_MANAGERS)
+  @Permissions('tables:manage')
+  blockTable(@Param('id') id: string, @Body() dto: { reason?: string }, @CurrentUser() actor: AuthUser) {
+    return this.tablesService.blockTable(id, actor.id, dto.reason);
+  }
+
   @Patch('tables/:id')
   @Roles(...TABLE_MANAGERS)
   @Permissions('tables:manage')

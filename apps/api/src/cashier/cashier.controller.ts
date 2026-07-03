@@ -6,6 +6,7 @@ import { Permissions } from '../auth/decorators/permissions.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { AddOrderItemDto } from '../orders/dto/add-order-item.dto';
 import { ApplyDiscountDto } from './dto/apply-discount.dto';
 import { CloseCashRegisterDto } from './dto/close-cash-register.dto';
 import { OpenCashRegisterDto } from './dto/open-cash-register.dto';
@@ -25,6 +26,34 @@ export class CashierController {
   @Permissions('payments:read')
   openOrders() {
     return this.cashierService.openOrders();
+  }
+
+  @Get('tables/reserved')
+  @Permissions('payments:read')
+  reservedTables() {
+    return this.cashierService.reservedTablesOverview();
+  }
+
+  @Get('tables/reservable')
+  @Permissions('payments:read')
+  reservableTables() {
+    return this.cashierService.reservableTablesOverview();
+  }
+
+  @Post('tables/reserve')
+  @Permissions('payments:create')
+  reserveTable(@Body() dto: {
+    tableId: string;
+    firstName: string;
+    lastName?: string;
+    phone?: string;
+    email?: string;
+    guestCount?: number;
+    depositAmount?: number;
+    reservationDate?: string;
+    notes?: string;
+  }, @CurrentUser() user: AuthUser) {
+    return this.cashierService.reserveTableFromCashier(dto, user);
   }
 
   @Get('config')
@@ -97,6 +126,28 @@ export class CashierController {
   @Permissions('payments:create')
   requestPaymentFromCashier(@Param('orderId') orderId: string, @CurrentUser() user: AuthUser) {
     return this.cashierService.requestPaymentFromCashier(orderId, user);
+  }
+
+  @Post('orders/:orderId/last-minute-items')
+  @Permissions('payments:create')
+  addLastMinuteItem(@Param('orderId') orderId: string, @Body() dto: AddOrderItemDto, @CurrentUser() user: AuthUser) {
+    return this.cashierService.addLastMinuteItem(orderId, dto, user);
+  }
+
+  @Post('orders/:orderId/release-empty')
+  @Permissions('payments:create')
+  releaseEmptyOrder(@Param('orderId') orderId: string, @Body() dto: { reason?: string }, @CurrentUser() user: AuthUser) {
+    return this.cashierService.releaseEmptyOrder(orderId, dto.reason ?? '', user);
+  }
+
+  @Post('orders/:orderId/cancel-authorized')
+  @Permissions('payments:create')
+  cancelAuthorizedOrder(
+    @Param('orderId') orderId: string,
+    @Body() dto: { authorizedBy?: string; reason?: string },
+    @CurrentUser() user: AuthUser
+  ) {
+    return this.cashierService.cancelAuthorizedOrder(orderId, dto.reason ?? '', dto.authorizedBy ?? '', user);
   }
 
   @Post('orders/:orderId/payments')

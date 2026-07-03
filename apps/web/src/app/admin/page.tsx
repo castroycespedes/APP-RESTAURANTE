@@ -176,9 +176,9 @@ const settingDefinitions: SettingDefinition[] = [
   { key: 'suggested_tip_rate', label: 'Propina sugerida', group: 'Operacion', type: 'number', defaultValue: '10', description: 'Porcentaje sugerido.' },
   { key: 'allow_custom_tip', label: 'Permitir propina personalizada', group: 'Operacion', type: 'checkbox', defaultValue: 'true', description: 'Permite editar propina.' },
   { key: 'allow_waiter_discounts', label: 'Descuentos por mesero', group: 'Operacion', type: 'checkbox', defaultValue: 'false', description: 'Permite descuentos menores por mesero.' },
-  { key: 'table_status_after_payment', label: 'Estado de mesa despues de pago', group: 'Operacion', type: 'select', defaultValue: 'CLEANING', description: 'Estado final de mesa.', options: [{ label: 'Disponible', value: 'AVAILABLE' }, { label: 'En limpieza', value: 'CLEANING' }] },
+  { key: 'table_status_after_payment', label: 'Estado de mesa despues de pago', group: 'Operacion', type: 'select', defaultValue: 'AVAILABLE', description: 'Estado final de mesa.', options: [{ label: 'Disponible', value: 'AVAILABLE' }, { label: 'En limpieza', value: 'CLEANING' }] },
   { key: 'require_open_cash_register', label: 'Requerir caja abierta', group: 'Caja', type: 'checkbox', defaultValue: 'true', description: 'Impide cobrar sin caja abierta.' },
-  { key: 'allow_cashier_request_payment', label: 'Caja puede pasar a cuenta', group: 'Caja', type: 'checkbox', defaultValue: 'true', description: 'Permite que caja ponga una orden en espera de pago.' },
+  { key: 'allow_cashier_request_payment', label: 'Caja puede pasar a cuenta', group: 'Caja', type: 'checkbox', defaultValue: 'false', description: 'Caja solo cobra cuentas solicitadas desde Pedidos.' },
   { key: 'allow_mixed_payments', label: 'Permitir pagos mixtos', group: 'Caja', type: 'checkbox', defaultValue: 'true', description: 'Combinar metodos.' },
   { key: 'allow_split_bill', label: 'Permitir dividir cuenta', group: 'Caja', type: 'checkbox', defaultValue: 'true', description: 'Activa division visual.' },
   { key: 'print_receipt_after_payment', label: 'Imprimir recibo despues de pago', group: 'Caja', type: 'checkbox', defaultValue: 'true', description: 'Prepara recibo al pagar.' },
@@ -1990,6 +1990,11 @@ export default function AdminPage() {
               </div>
             </article>
           </section>
+        ) : activeSection === 'cashier' ? (
+          <AdminCashierPendingPanel
+            orders={resourceRows.cashier ?? []}
+            onRefresh={() => loadResource('cashier', { silent: true })}
+          />
         ) : (
           <section className={activeSection === 'inventory' ? 'admin-section inventory-full-section' : 'admin-section'}>
             <div className="admin-panel">
@@ -3767,10 +3772,10 @@ function createResourceConfigs(resourceRows: Partial<Record<SectionKey, Array<Re
       })
     },
     cashier: {
-      title: 'Crear caja',
+      title: 'Abrir caja',
       successMessage: 'Caja creada correctamente.',
       endpoint: 'cashier/cash-registers/open',
-      listEndpoint: 'cashier/orders/open',
+      listEndpoint: 'cash-register/pending-tables',
       fields: [
         { name: 'name', label: 'Nombre caja', type: 'text', required: true },
         { name: 'openingAmount', label: 'Monto inicial', type: 'number', required: true, defaultValue: 0 },
@@ -3780,7 +3785,7 @@ function createResourceConfigs(resourceRows: Partial<Record<SectionKey, Array<Re
         id: String(item.orderNumber ?? item.id),
         displayId: String(item.orderNumber ?? shortRecordCode('ORD', item.id)),
         name: String((item.table as Record<string, unknown> | undefined)?.name ?? item.name ?? 'Orden'),
-        status: String(item.status ?? 'OPEN'),
+        status: 'Cuenta solicitada',
         detail: String((item.waiter as Record<string, unknown> | undefined)?.email ?? 'Caja'),
         metric: formatCurrency(Number(item.total ?? 0))
       })
@@ -3879,6 +3884,99 @@ function resourceSingularLabel(section: SectionKey) {
   };
 
   return labels[section] ?? 'Registro';
+}
+
+function AdminCashierPendingPanel({
+  orders,
+  onRefresh
+}: {
+  orders: Array<Record<string, unknown>>;
+  onRefresh: () => void;
+}) {
+  const pendingTotal = orders.reduce((total, order) => total + Number(order.total ?? 0), 0);
+
+  function openCashier(order?: Record<string, unknown>, mode = 'checkout') {
+    const orderId = order ? String(order.id ?? '') : '';
+    const params = new URLSearchParams();
+
+    if (orderId) {
+      params.set('orderId', orderId);
+    }
+
+    if (mode) {
+      params.set('mode', mode);
+    }
+
+    window.location.assign(`/caja${params.toString() ? `?${params.toString()}` : ''}`);
+  }
+
+  return (
+    <section className="admin-section admin-cashier-section">
+      <div className="admin-panel admin-cashier-hero">
+        <div>
+          <p className="eyebrow">Caja operativa</p>
+          <h2>Mesas pendientes de cobro</h2>
+          <span>Solo aparecen las mesas que desde Pedidos pidieron cuenta.</span>
+        </div>
+        <div className="admin-cashier-summary">
+          <div><span>Mesas por cobrar</span><strong>{orders.length}</strong></div>
+          <div><span>Total pendiente</span><strong>{formatCurrency(pendingTotal)}</strong></div>
+        </div>
+        <div className="admin-cashier-actions">
+          <button className="primary-action" type="button" onClick={() => openCashier()}>
+            Abrir caja / cobrar
+          </button>
+          <button className="secondary-action" type="button" onClick={onRefresh}>
+            Refrescar pendientes
+          </button>
+        </div>
+      </div>
+
+      <div className="admin-panel admin-cashier-floor">
+        {orders.length === 0 ? (
+          <div className="empty-state">
+            <strong>No hay mesas pendientes de pago.</strong>
+            <span>Cuando el mesero pida cuenta desde Pedidos, la mesa aparecera aqui automaticamente.</span>
+          </div>
+        ) : (
+          orders.map((order) => {
+            const table = order.table as Record<string, unknown> | undefined;
+            const waiter = order.waiter as Record<string, unknown> | undefined;
+            const diningArea = table?.diningArea as Record<string, unknown> | undefined;
+            const items = Array.isArray(order.items) ? order.items : [];
+            const tableName = String(table?.name ?? `Mesa ${String(table?.number ?? '')}`.trim());
+            const waiterLabel = [waiter?.firstName, waiter?.lastName].filter(Boolean).join(' ') || String(waiter?.email ?? 'Sin mesero');
+
+            return (
+              <article className="admin-cashier-table-card" key={String(order.id)}>
+                <div className="admin-cashier-table-visual" aria-hidden="true">
+                  <span className="table-chair top" />
+                  <span className="table-chair right" />
+                  <span className="table-chair bottom" />
+                  <span className="table-chair left" />
+                  <span className="waiter-table-surface">
+                    <span className="waiter-table-number">{String(table?.number ?? '')}</span>
+                    <strong>{tableName}</strong>
+                  </span>
+                </div>
+                <div className="admin-cashier-table-info">
+                  <strong>{tableName}</strong>
+                  <span>{String(diningArea?.name ?? 'Sin area')} - {waiterLabel}</span>
+                  <span>{items.length} productos - Cuenta solicitada</span>
+                  <em>{formatCurrency(Number(order.total ?? 0))}</em>
+                </div>
+                <div className="admin-cashier-card-actions">
+                  <button type="button" onClick={() => openCashier(order, 'preinvoice')}>Prefactura</button>
+                  <button type="button" onClick={() => openCashier(order, 'split')}>Dividir cuenta</button>
+                  <button className="primary-action" type="button" onClick={() => openCashier(order, 'checkout')}>Cobrar</button>
+                </div>
+              </article>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
 }
 
 function inventoryMovementLabel(type: string) {

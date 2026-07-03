@@ -20,7 +20,8 @@ const MENU_VIEWERS = [
   UserRole.ADMIN,
   UserRole.MANAGER,
   UserRole.WAITER,
-  UserRole.KITCHEN
+  UserRole.KITCHEN,
+  UserRole.CASHIER
 ];
 
 @Controller('menu')
@@ -43,10 +44,38 @@ export class MenuController {
   }
 
   @Get('categories')
-  @Roles(...MENU_MANAGERS)
-  @Permissions('menu:manage')
+  @Roles(...MENU_VIEWERS)
+  @Permissions('menu:read')
   findAllCategories() {
     return this.menuService.findAllCategories();
+  }
+
+  @Get('categories/:categoryId/subcategories')
+  @Roles(...MENU_VIEWERS)
+  @Permissions('menu:read')
+  findSubcategories(@Param('categoryId') categoryId: string) {
+    return this.menuService.findActiveSubcategories(categoryId);
+  }
+
+  @Get('items/by-category/:categoryId')
+  @Roles(...MENU_VIEWERS)
+  @Permissions('menu:read')
+  findItemsByCategory(@Param('categoryId') categoryId: string) {
+    return this.menuService.findAvailableItemsByCategory(categoryId);
+  }
+
+  @Get('items/by-subcategory/:subcategoryId')
+  @Roles(...MENU_VIEWERS)
+  @Permissions('menu:read')
+  findItemsBySubcategory(@Param('subcategoryId') subcategoryId: string) {
+    return this.menuService.findAvailableItemsByCategory(subcategoryId);
+  }
+
+  @Get('items/:id/applicable-modifiers')
+  @Roles(...MENU_VIEWERS)
+  @Permissions('menu:read')
+  findApplicableModifiers(@Param('id') id: string) {
+    return this.menuService.findApplicableModifiers(id);
   }
 
   @Post('categories')

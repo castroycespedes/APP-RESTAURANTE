@@ -1,4 +1,4 @@
-import { PrismaClient, UserRole } from '@prisma/client';
+import { MenuItemType, PrismaClient, UserRole } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -49,6 +49,140 @@ const roleNames: Record<UserRole, string> = {
   KITCHEN: 'Kitchen',
   CASHIER: 'Cashier',
   INVENTORY: 'Inventory'
+};
+
+const menuSeed = [
+  {
+    name: 'Platos fuertes',
+    description: 'Platos principales para servicio en mesa.',
+    sortOrder: 10,
+    subcategories: [
+      {
+        name: 'Carnes',
+        products: [
+          {
+            name: 'Punta gorda a la parrilla',
+            description: 'Corte de carne acompanado de arroz, ensalada y papas.',
+            price: 28000
+          }
+        ]
+      },
+      {
+        name: 'Pollos',
+        products: [
+          {
+            name: 'Pechuga a la plancha',
+            description: 'Pechuga con guarnicion de arroz y vegetales.',
+            price: 22000
+          }
+        ]
+      },
+      {
+        name: 'Pastas',
+        products: [
+          {
+            name: 'Pasta en salsa de la casa',
+            description: 'Pasta con salsa especial y queso.',
+            price: 18000
+          }
+        ]
+      }
+    ]
+  },
+  {
+    name: 'Bebidas',
+    description: 'Bebidas frias y calientes.',
+    sortOrder: 20,
+    subcategories: [
+      {
+        name: 'Gaseosas',
+        products: [{ name: 'Gaseosa personal', description: 'Bebida gaseosa personal.', price: 5000, type: MenuItemType.DRINK }]
+      },
+      {
+        name: 'Jugos naturales',
+        products: [{ name: 'Jugo natural', description: 'Jugo natural preparado al momento.', price: 7000, type: MenuItemType.DRINK }]
+      },
+      {
+        name: 'Agua',
+        products: [{ name: 'Agua', description: 'Botella de agua personal.', price: 4000, type: MenuItemType.DRINK }]
+      }
+    ]
+  },
+  {
+    name: 'Postres',
+    description: 'Postres de la casa.',
+    sortOrder: 30,
+    subcategories: [
+      { name: 'Frios', products: [{ name: 'Flan de la casa', description: 'Flan cremoso preparado en casa.', price: 9000 }] },
+      { name: 'Calientes', products: [{ name: 'Brownie con helado', description: 'Brownie tibio con helado.', price: 12000 }] },
+      { name: 'Especiales', products: [{ name: 'Tres leches', description: 'Postre tres leches tradicional.', price: 10000 }] }
+    ]
+  },
+  {
+    name: 'Entradas',
+    description: 'Entradas para compartir.',
+    sortOrder: 40,
+    subcategories: [
+      { name: 'Frituras', products: [{ name: 'Empanadas', description: 'Empanadas crocantes de la casa.', price: 9000 }] },
+      { name: 'Acompanamientos', products: [{ name: 'Patacones', description: 'Patacones con hogao.', price: 10000 }] },
+      { name: 'Sopas', products: [{ name: 'Sopa del dia', description: 'Sopa preparada del dia.', price: 11000 }] }
+    ]
+  },
+  {
+    name: 'Para llevar',
+    description: 'Opciones empacadas para llevar.',
+    sortOrder: 50,
+    subcategories: [
+      { name: 'Combos', products: [{ name: 'Combo ejecutivo', description: 'Plato ejecutivo empacado con bebida.', price: 24000 }] },
+      { name: 'Empacados', products: [{ name: 'Plato empacado', description: 'Plato principal listo para llevar.', price: 20000 }] },
+      { name: 'Bebidas para llevar', products: [{ name: 'Bebida para llevar', description: 'Bebida sellada para llevar.', price: 5000, type: MenuItemType.DRINK }] }
+    ]
+  },
+  {
+    name: 'Adicionales',
+    description: 'Adiciones y acompanamientos.',
+    sortOrder: 60,
+    subcategories: [
+      { name: 'Quesos', products: [{ name: 'Extra queso', description: 'Porcion adicional de queso.', price: 3000, type: MenuItemType.ADD_ON }] },
+      { name: 'Acompanamientos', products: [{ name: 'Porcion de arroz', description: 'Porcion adicional de arroz.', price: 4000, type: MenuItemType.ADD_ON }] },
+      { name: 'Salsas', products: [{ name: 'Salsa adicional', description: 'Salsa adicional de la casa.', price: 2000, type: MenuItemType.ADD_ON }] }
+    ]
+  }
+];
+
+const categoryModifierSeed: Record<string, Array<{ name: string; priceDelta?: number }>> = {
+  'Platos fuertes': [
+    { name: 'Sin cebolla' },
+    { name: 'Sin salsa' },
+    { name: 'Termino medio' },
+    { name: 'Bien asado' },
+    { name: 'Extra queso', priceDelta: 3000 }
+  ],
+  Bebidas: [
+    { name: 'Con hielo' },
+    { name: 'Sin hielo' },
+    { name: 'Poco hielo' },
+    { name: 'Sin azucar' },
+    { name: 'Con limon' }
+  ],
+  Postres: [
+    { name: 'Con salsa' },
+    { name: 'Sin salsa' },
+    { name: 'Salsa de chocolate', priceDelta: 2000 },
+    { name: 'Toppings', priceDelta: 2500 },
+    { name: 'Extra crema', priceDelta: 2500 }
+  ],
+  Entradas: [
+    { name: 'Con salsa' },
+    { name: 'Sin salsa' },
+    { name: 'Picante' },
+    { name: 'Sin picante' }
+  ],
+  'Para llevar': [
+    { name: 'Empacado para llevar' },
+    { name: 'Cubiertos' },
+    { name: 'Salsa aparte' }
+  ]
 };
 
 async function main() {
@@ -204,7 +338,7 @@ async function main() {
     {
       key: 'table_status_after_payment',
       label: 'Mesa al pagar',
-      value: 'CLEANING',
+      value: 'AVAILABLE',
       description: 'Estado que recibe una mesa cuando la orden queda pagada.',
       group: 'cashier'
     },
@@ -232,8 +366,8 @@ async function main() {
     {
       key: 'allow_cashier_request_payment',
       label: 'Caja puede pasar a cuenta',
-      value: 'true',
-      description: 'Permite que caja ponga una orden en espera de pago para cobrarla.',
+      value: 'false',
+      description: 'Solo permite cobrar ordenes enviadas a caja desde Pedidos.',
       group: 'cashier'
     },
     {
@@ -427,6 +561,235 @@ async function main() {
       create: setting
     });
   }
+
+  await seedOperationalMenu();
+  await mergeDuplicateSeedCategories();
+  await mergeDuplicateSeedSubcategories();
+}
+
+async function seedOperationalMenu() {
+  for (const [categoryIndex, categorySeed] of menuSeed.entries()) {
+    const category = await findOrCreateCategory(categorySeed.name, null, {
+      description: categorySeed.description,
+      sortOrder: categorySeed.sortOrder ?? categoryIndex * 10
+    });
+
+    for (const [subcategoryIndex, subcategorySeed] of categorySeed.subcategories.entries()) {
+      const subcategory = await findOrCreateCategory(subcategorySeed.name, category.id, {
+        description: `${subcategorySeed.name} de ${categorySeed.name}`,
+        sortOrder: subcategoryIndex * 10
+      });
+
+      for (const [productIndex, productSeed] of subcategorySeed.products.entries()) {
+        const sku = `POS-${slug(categorySeed.name)}-${slug(subcategorySeed.name)}-${productIndex + 1}`;
+
+        const item = await prisma.menuItem.upsert({
+          where: { sku },
+          update: {
+            categoryId: subcategory.id,
+            type: productSeed.type ?? MenuItemType.DISH,
+            name: productSeed.name,
+            description: productSeed.description,
+            price: productSeed.price,
+            isAvailable: true,
+            isActive: true,
+            showForWaiters: true,
+            showInPublicMenu: true
+          },
+          create: {
+            sku,
+            categoryId: subcategory.id,
+            type: productSeed.type ?? MenuItemType.DISH,
+            name: productSeed.name,
+            description: productSeed.description,
+            price: productSeed.price,
+            isAvailable: true,
+            isActive: true,
+            showForWaiters: true,
+            showInPublicMenu: true
+          }
+        });
+
+        for (const modifier of categoryModifierSeed[categorySeed.name] ?? []) {
+          await seedDefaultModifier(item.id, modifier.name, modifier.priceDelta ?? 0);
+        }
+
+        const allowedModifierNames = new Set((categoryModifierSeed[categorySeed.name] ?? []).map((modifier) => modifier.name));
+
+        if (allowedModifierNames.size > 0) {
+          await prisma.menuItemModifier.updateMany({
+            where: {
+              menuItemId: item.id,
+              name: { notIn: Array.from(allowedModifierNames) }
+            },
+            data: { isActive: false }
+          });
+        }
+      }
+    }
+  }
+}
+
+async function findOrCreateCategory(
+  name: string,
+  parentId: string | null,
+  data: { description?: string; sortOrder: number }
+) {
+  const current = await prisma.menuCategory.findFirst({
+    where: {
+      name: { equals: name, mode: 'insensitive' },
+      parentId
+    }
+  });
+
+  if (current) {
+    return prisma.menuCategory.update({
+      where: { id: current.id },
+      data: {
+        description: data.description,
+        sortOrder: data.sortOrder,
+        isActive: true
+      }
+    });
+  }
+
+  return prisma.menuCategory.create({
+    data: {
+      name,
+      parentId,
+      description: data.description,
+      sortOrder: data.sortOrder,
+      isActive: true
+    }
+  });
+}
+
+async function mergeDuplicateSeedCategories() {
+  for (const categorySeed of menuSeed) {
+    const candidates = await prisma.menuCategory.findMany({
+      where: {
+        name: { equals: categorySeed.name, mode: 'insensitive' },
+        parentId: null
+      },
+      include: {
+        children: true,
+        items: true
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+    });
+
+    if (candidates.length <= 1) {
+      continue;
+    }
+
+    const keeper =
+      candidates.find((category) => category.name === categorySeed.name && category.children.length > 0) ??
+      candidates.find((category) => category.children.length > 0) ??
+      candidates[0];
+    const duplicates = candidates.filter((category) => category.id !== keeper.id);
+
+    for (const duplicate of duplicates) {
+      await prisma.menuCategory.updateMany({
+        where: { parentId: duplicate.id },
+        data: { parentId: keeper.id }
+      });
+      await prisma.menuItem.updateMany({
+        where: { categoryId: duplicate.id },
+        data: { categoryId: keeper.id }
+      });
+      await prisma.menuCategory.update({
+        where: { id: duplicate.id },
+        data: { isActive: false }
+      });
+    }
+  }
+}
+
+async function mergeDuplicateSeedSubcategories() {
+  for (const categorySeed of menuSeed) {
+    const parent = await prisma.menuCategory.findFirst({
+      where: {
+        name: { equals: categorySeed.name, mode: 'insensitive' },
+        parentId: null,
+        isActive: true
+      }
+    });
+
+    if (!parent) {
+      continue;
+    }
+
+    for (const subcategorySeed of categorySeed.subcategories) {
+      const candidates = await prisma.menuCategory.findMany({
+        where: {
+          name: { equals: subcategorySeed.name, mode: 'insensitive' },
+          parentId: parent.id
+        },
+        include: {
+          items: true
+        },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }]
+      });
+
+      if (candidates.length <= 1) {
+        continue;
+      }
+
+      const keeper =
+        candidates.find((category) => category.name === subcategorySeed.name && category.items.length > 0) ??
+        candidates.find((category) => category.items.length > 0) ??
+        candidates[0];
+      const duplicates = candidates.filter((category) => category.id !== keeper.id);
+
+      for (const duplicate of duplicates) {
+        await prisma.menuItem.updateMany({
+          where: { categoryId: duplicate.id },
+          data: { categoryId: keeper.id }
+        });
+        await prisma.menuCategory.update({
+          where: { id: duplicate.id },
+          data: { isActive: false }
+        });
+      }
+    }
+  }
+}
+
+async function seedDefaultModifier(menuItemId: string, name: string, priceDelta: number) {
+  const current = await prisma.menuItemModifier.findFirst({
+    where: {
+      menuItemId,
+      name
+    }
+  });
+
+  if (current) {
+    return prisma.menuItemModifier.update({
+      where: { id: current.id },
+      data: {
+        priceDelta,
+        isActive: true
+      }
+    });
+  }
+
+  return prisma.menuItemModifier.create({
+    data: {
+      menuItemId,
+      name,
+      priceDelta,
+      isActive: true
+    }
+  });
+}
+
+function slug(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
 }
 
 main()

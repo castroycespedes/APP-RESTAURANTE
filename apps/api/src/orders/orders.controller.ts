@@ -103,6 +103,13 @@ export class OrdersController {
     return this.ordersService.sendPendingItemsToKitchen(orderId, waiter);
   }
 
+  @Post(':orderId/mark-served')
+  @Roles(...ORDER_OPERATORS)
+  @Permissions('orders:update')
+  markReadyItemsServed(@Param('orderId') orderId: string, @CurrentUser() waiter: AuthUser) {
+    return this.ordersService.markReadyItemsServed(orderId, waiter);
+  }
+
   @Post(':orderId/request-payment')
   @Roles(...ORDER_OPERATORS)
   @Permissions('orders:update')

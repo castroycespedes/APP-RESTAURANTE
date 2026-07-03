@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { KitchenTicketStatus, OrderItemStatus, OrderStatus, Prisma, TableStatus, UserRole } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
 import type { AuthUser } from '../auth/auth.types';
@@ -107,8 +107,16 @@ export class OrdersService {
       return table.orders[0];
     }
 
-    if (table.status !== TableStatus.AVAILABLE) {
-      throw new ConflictException('Only available tables can be opened');
+    if (table.status === TableStatus.BLOCKED) {
+      throw new ConflictException('No se puede abrir pedido en una mesa bloqueada.');
+    }
+
+    if (table.status === TableStatus.CLEANING) {
+      throw new ConflictException('No se puede abrir pedido en una mesa en limpieza.');
+    }
+
+    if (table.status !== TableStatus.AVAILABLE && table.status !== TableStatus.RESERVED) {
+      throw new ConflictException('Esta mesa ya tiene un pedido activo.');
     }
 
     const joinedTables = dto.joinedTableIds?.length
@@ -381,6 +389,95 @@ export class OrdersService {
     return order;
   }
 
+  async markReadyItemsServed(orderId: string, waiter: AuthUser) {
+    const orderAccess = await this.ensureOrderAccess(orderId, waiter);
+
+    if (
+      orderAccess.status === OrderStatus.PAID ||
+      orderAccess.status === OrderStatus.CLOSED ||
+      orderAccess.status === OrderStatus.CANCELLED ||
+      orderAccess.status === OrderStatus.WAITING_PAYMENT
+    ) {
+      throw new ConflictException('Esta orden no permite marcar entregas.');
+    }
+
+    const deliverableItems = await this.prisma.orderItem.findMany({
+      where: {
+        orderId,
+        status: { in: [OrderItemStatus.SENT, OrderItemStatus.PREPARING, OrderItemStatus.READY] }
+      },
+      select: { id: true }
+    });
+
+    if (deliverableItems.length === 0) {
+      throw new ConflictException('No hay productos de cocina para marcar como entregados.');
+    }
+
+    const deliverableItemIds = deliverableItems.map((item) => item.id);
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderItem.updateMany({
+        where: { id: { in: deliverableItemIds } },
+        data: { status: OrderItemStatus.SERVED }
+      });
+
+      await tx.kitchenTicketItem.updateMany({
+        where: { orderItemId: { in: deliverableItemIds } },
+        data: { status: OrderItemStatus.SERVED }
+      });
+
+      const remainingItems = await tx.orderItem.findMany({
+        where: {
+          orderId,
+          status: { not: OrderItemStatus.CANCELLED }
+        },
+        select: { status: true }
+      });
+
+      const nextOrderStatus = this.statusAfterService(remainingItems.map((item) => item.status));
+      const nextTableStatus = this.tableStatusAfterService(remainingItems.map((item) => item.status));
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { status: nextOrderStatus }
+      });
+
+      await tx.restaurantTable.update({
+        where: { id: orderAccess.tableId },
+        data: { status: nextTableStatus }
+      });
+
+      const tickets = await tx.kitchenTicket.findMany({
+        where: { orderId },
+        include: { items: true }
+      });
+
+      await Promise.all(tickets.map((ticket) => {
+        const activeTicketItems = ticket.items.filter((item) => item.status !== OrderItemStatus.CANCELLED);
+        const allServed = activeTicketItems.length > 0 && activeTicketItems.every((item) => item.status === OrderItemStatus.SERVED);
+
+        if (!allServed || ticket.status === KitchenTicketStatus.DELIVERED) {
+          return Promise.resolve();
+        }
+
+        return tx.kitchenTicket.update({
+          where: { id: ticket.id },
+          data: { status: KitchenTicketStatus.DELIVERED }
+        });
+      }));
+    });
+
+    await this.auditService.log({
+      userId: waiter.id,
+      action: 'orders.ready-items.served',
+      entity: 'Order',
+      entityId: orderId,
+      after: { itemIds: deliverableItemIds, status: OrderItemStatus.SERVED }
+    });
+
+    return this.recalculateAndReturn(orderId);
+  }
+
   async requestPayment(orderId: string, waiter: AuthUser) {
     const order = await this.ensureOrderAccess(orderId, waiter);
 
@@ -532,6 +629,42 @@ export class OrdersService {
     return order;
   }
 
+  private statusAfterService(statuses: OrderItemStatus[]) {
+    if (statuses.some((status) => status === OrderItemStatus.READY)) {
+      return OrderStatus.READY;
+    }
+
+    if (statuses.some((status) => status === OrderItemStatus.PREPARING)) {
+      return OrderStatus.PREPARING;
+    }
+
+    if (statuses.some((status) => status === OrderItemStatus.SENT)) {
+      return OrderStatus.SENT_TO_KITCHEN;
+    }
+
+    if (statuses.some((status) => status === OrderItemStatus.PENDING)) {
+      return OrderStatus.OPEN;
+    }
+
+    if (statuses.some((status) => status === OrderItemStatus.SERVED)) {
+      return OrderStatus.SERVED;
+    }
+
+    return OrderStatus.OPEN;
+  }
+
+  private tableStatusAfterService(statuses: OrderItemStatus[]) {
+    if (statuses.some((status) => status === OrderItemStatus.READY)) {
+      return TableStatus.READY_TO_SERVE;
+    }
+
+    if (statuses.some((status) => status === OrderItemStatus.SENT || status === OrderItemStatus.PREPARING)) {
+      return TableStatus.WAITING_KITCHEN;
+    }
+
+    return TableStatus.OCCUPIED;
+  }
+
   private async ensureJoinableTables(joinedTableIds: string[], mainTableId: string, waiterId: string) {
     const uniqueIds = [...new Set(joinedTableIds)].filter((id) => id !== mainTableId);
 
@@ -559,7 +692,11 @@ export class OrdersService {
   }
 
   private ensureOrderEditable(status: OrderStatus) {
-    if (status === OrderStatus.CLOSED || status === OrderStatus.CANCELLED) {
+    if (status === OrderStatus.WAITING_PAYMENT) {
+      throw new ConflictException('La cuenta ya fue enviada a caja. No se pueden adicionar productos.');
+    }
+
+    if (status === OrderStatus.CLOSED || status === OrderStatus.CANCELLED || status === OrderStatus.PAID) {
       throw new ConflictException('Closed or cancelled orders cannot be edited');
     }
   }
@@ -639,14 +776,14 @@ export class OrdersService {
     });
 
     if (records.length !== new Set(modifierIds).size) {
-      throw new NotFoundException('One or more modifiers were not found for this menu item');
+      throw new BadRequestException('El adicional seleccionado no aplica para este producto.');
     }
 
     return modifiers.map((modifier) => {
       const record = records.find((item) => item.id === modifier.modifierId);
 
       if (!record) {
-        throw new NotFoundException('Modifier not found');
+        throw new BadRequestException('El adicional seleccionado no aplica para este producto.');
       }
 
       return {

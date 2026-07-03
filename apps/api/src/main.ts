@@ -9,16 +9,12 @@ import { SanitizeInputPipe } from './common/pipes/sanitize-input.pipe';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const port = Number(process.env.PORT ?? 4000);
-  const corsOrigins = process.env.CORS_ORIGINS?.split(',') ?? [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'http://localhost:3005',
-    'http://127.0.0.1:3005'
-  ];
 
   app.enableCors({
-    origin: corsOrigins,
-    credentials: true
+    origin: true,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
   });
   app.useGlobalPipes(
     new SanitizeInputPipe(),

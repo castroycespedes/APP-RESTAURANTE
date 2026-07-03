@@ -449,6 +449,47 @@ export class TablesService {
     return table;
   }
 
+  async markTableAvailable(id: string, actorId: string) {
+    const current = await this.ensureTableExists(id);
+    const table = await this.prisma.restaurantTable.update({
+      where: { id },
+      data: { status: TableStatus.AVAILABLE },
+      include: tableInclude
+    });
+
+    await this.auditService.log({
+      userId: actorId,
+      action: 'admin.table.mark-available',
+      entity: 'RestaurantTable',
+      entityId: id,
+      before: current,
+      after: table
+    });
+
+    return table;
+  }
+
+  async blockTable(id: string, actorId: string, reason?: string) {
+    const current = await this.ensureTableExists(id);
+    const table = await this.prisma.restaurantTable.update({
+      where: { id },
+      data: { status: TableStatus.BLOCKED },
+      include: tableInclude
+    });
+
+    await this.auditService.log({
+      userId: actorId,
+      action: 'admin.table.block',
+      entity: 'RestaurantTable',
+      entityId: id,
+      before: current,
+      after: table,
+      metadata: { reason: reason?.trim() || null }
+    });
+
+    return table;
+  }
+
   async autoArrangeTables(dto: AutoArrangeTablesDto, actorId: string) {
     if (dto.areaId) {
       await this.ensureAreaExists(dto.areaId);

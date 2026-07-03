@@ -3,6 +3,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
 import { Button } from '@restaurante/ui';
 import { AuthGate, routeForRole, useAuth } from '../auth-provider';
+import { ActionResultFocus } from '../components/pos/waiter-components';
 import { useAppTheme } from '../theme-provider';
 
 type PaymentMethod = 'CASH' | 'CARD' | 'TRANSFER' | 'QR' | 'MIXED';
@@ -31,7 +32,15 @@ interface CashierOrder {
   taxTotal: number | string;
   tipTotal: number | string;
   total: number | string;
-  table: { id: string; name: string; number: string; status: string };
+  table: {
+    capacity?: number | null;
+    diningArea?: { name?: string | null } | null;
+    id: string;
+    name: string;
+    number: string;
+    reservation?: CashierReservedTable['reservation'];
+    status: string;
+  };
   waiter?: { firstName?: string | null; lastName?: string | null; email: string } | null;
   customer?: { firstName?: string | null; lastName?: string | null; phone?: string | null; email?: string | null } | null;
   items: Array<{
@@ -74,6 +83,58 @@ interface CashierConfig {
   printReceiptAfterPayment: boolean;
   showTipOnReceipt: boolean;
   allowCustomTip: boolean;
+}
+
+interface CashierPromotion {
+  id: string;
+  name: string;
+  type: DiscountType;
+  value: number | string;
+  isActive?: boolean;
+}
+
+interface CashierReservedTable {
+  id: string;
+  name: string;
+  number: string;
+  capacity: number;
+  status?: string;
+  diningArea?: { name?: string | null } | null;
+  reservation?: {
+    customerId: string;
+    customerName: string;
+    depositAmount: number | string;
+    email?: string | null;
+    guestCount?: number | null;
+    notes?: string | null;
+    phone?: string | null;
+    registeredAt?: string | null;
+    reservationDate?: string | null;
+  } | null;
+}
+
+interface CashierMenuModifier {
+  id: string;
+  menuItemId: string;
+  name: string;
+  priceDelta?: number | string;
+  price?: number | string;
+}
+
+interface CashierMenuItem {
+  id: string;
+  categoryId: string;
+  name: string;
+  description?: string | null;
+  price: number | string;
+  modifiers?: CashierMenuModifier[];
+}
+
+interface CashierMenuCategory {
+  id: string;
+  name: string;
+  items?: CashierMenuItem[];
+  children?: CashierMenuCategory[];
 }
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
@@ -161,6 +222,19 @@ function isWaitingPaymentOrder(order: CashierOrder) {
   return order.status === 'WAITING_PAYMENT' || order.table.status === 'WAITING_PAYMENT';
 }
 
+function cashierTableStatusClass(order: CashierOrder) {
+  if (order.status === 'PAID') return 'paid';
+  if (isWaitingPaymentOrder(order)) return 'waiting-payment';
+  if (order.table.status === 'OCCUPIED') return 'occupied';
+  return String(order.table.status || order.status || 'available').toLowerCase().replaceAll('_', '-');
+}
+
+function cashierTableStatusLabel(order: CashierOrder) {
+  if (isWaitingPaymentOrder(order)) return 'Pidio cuenta';
+  if (order.status === 'PAID') return 'Pagando';
+  return orderStatusLabel(order.status);
+}
+
 function canMoveOrderToPayment(order: CashierOrder) {
   return ['OPEN', 'SENT', 'SENT_TO_KITCHEN', 'IN_PROGRESS', 'PREPARING', 'READY', 'SERVED'].includes(order.status);
 }
@@ -230,28 +304,102 @@ function OpenCashRegisterPanel({ onOpen }: { onOpen: (event: FormEvent<HTMLFormE
 function CashRegisterStatusCard({
   cashRegister,
   currentUserEmail,
+  onOpenReservation,
+  onSelectReservation,
   onClose,
+  promotions,
+  reservedTables,
   summary
 }: {
   cashRegister: CashRegister | null;
   currentUserEmail?: string;
+  onOpenReservation: () => void;
+  onSelectReservation: (table: CashierReservedTable) => void;
   onClose: (event: FormEvent<HTMLFormElement>) => void;
+  promotions: CashierPromotion[];
+  reservedTables: CashierReservedTable[];
   summary: CashRegisterSummary | null;
 }) {
+  const [cashCounted, setCashCounted] = useState(0);
+  const [cardCounted, setCardCounted] = useState(0);
+  const [transferCounted, setTransferCounted] = useState(0);
+  const [qrCounted, setQrCounted] = useState(0);
+  const [showCloseAudit, setShowCloseAudit] = useState(false);
+  const expected = {
+    cash: summary?.totals.expectedCash ?? 0,
+    card: summary?.totals.card ?? 0,
+    transfer: summary?.totals.transfer ?? 0,
+    qr: summary?.totals.qr ?? 0
+  };
+  const counted = { cash: cashCounted, card: cardCounted, transfer: transferCounted, qr: qrCounted };
+  const totalDifference = (counted.cash - expected.cash) + (counted.card - expected.card) + (counted.transfer - expected.transfer) + (counted.qr - expected.qr);
+
   return (
     <section className="cashier-register-workflow" aria-label="Turno de caja">
       <article className="cashier-register-card">
-        <div>
-          <p className="eyebrow">Turno de caja</p>
-          <h2>{cashRegister ? 'Caja abierta' : 'Caja cerrada'}</h2>
-          <span>
-            {cashRegister
-              ? `${cashRegister.name} abierta por ${cashRegister.openedBy?.email ?? currentUserEmail ?? 'usuario actual'}`
-              : 'Abre caja una sola vez al iniciar el turno. Este paso esta separado del cobro de mesas.'}
-          </span>
+        <div className="cashier-shift-compact">
+          <div>
+            <p className="eyebrow">Turno de caja</p>
+            <h2>{cashRegister ? 'Caja abierta' : 'Caja cerrada'}</h2>
+            <span>
+              {cashRegister
+                ? `${cashRegister.name} abierta por ${cashRegister.openedBy?.email ?? currentUserEmail ?? 'usuario actual'}`
+                : 'Abre caja una sola vez al iniciar el turno.'}
+            </span>
+          </div>
+          <strong>{cashRegister ? money(numberValue(cashRegister.openingAmount)) : money(0)}</strong>
+          {cashRegister?.openedAt && <small>Apertura: {formatDateTime(cashRegister.openedAt)}</small>}
         </div>
-        <strong>{cashRegister ? money(numberValue(cashRegister.openingAmount)) : money(0)}</strong>
-        {cashRegister?.openedAt && <small>Apertura: {formatDateTime(cashRegister.openedAt)}</small>}
+
+        <div className="cashier-insights-panel">
+          <section className="cashier-promo-carousel" aria-label="Promociones vigentes">
+            <header>
+              <strong>Promociones vigentes</strong>
+              <span>{promotions.length} activas</span>
+            </header>
+            <div>
+              {promotions.slice(0, 4).map((promotion) => (
+                <article key={promotion.id}>
+                  <span>{promotion.type === 'PERCENTAGE' ? `${numberValue(promotion.value)}%` : money(numberValue(promotion.value))}</span>
+                  <strong>{promotion.name}</strong>
+                  <em>Recordar al cliente antes de cerrar.</em>
+                </article>
+              ))}
+              {promotions.length === 0 && (
+                <article>
+                  <span>POS</span>
+                  <strong>Sin promociones activas</strong>
+                  <em>Configuralas en descuentos para mostrarlas aqui.</em>
+                </article>
+              )}
+            </div>
+          </section>
+
+          <section className="cashier-reservation-widget" aria-label="Reservas y abonos">
+            <header>
+              <strong>Reservas y abonos</strong>
+              <button className="secondary-action mini-action" type="button" onClick={onOpenReservation}>Reservar</button>
+            </header>
+            <div>
+              {reservedTables.slice(0, 3).map((table) => (
+                <details className="cashier-reservation-card" key={table.id}>
+                  <summary>
+                    <strong>Mesa {table.number}</strong>
+                    <span>{table.reservation?.customerName || 'Cliente sin nombre'} - {table.reservation?.guestCount ?? table.capacity} personas</span>
+                    <em>Abono consumible: {money(numberValue(table.reservation?.depositAmount))}</em>
+                  </summary>
+                  <div>
+                    <span>Area: {table.diningArea?.name ?? 'Sin area'}</span>
+                    <span>Fecha: {table.reservation?.reservationDate || 'Sin fecha registrada'}</span>
+                    <span>Telefono: {table.reservation?.phone || 'Sin telefono'}</span>
+                    <button className="secondary-action mini-action" type="button" onClick={() => onSelectReservation(table)}>Ver detalle</button>
+                  </div>
+                </details>
+              ))}
+              {reservedTables.length === 0 && <p>No hay mesas reservadas en este momento.</p>}
+            </div>
+          </section>
+        </div>
       </article>
 
       <form className="cashier-register-form" id="close-register-form" onSubmit={onClose}>
@@ -260,11 +408,110 @@ function CashRegisterStatusCard({
           <div><span>Efectivo esperado</span><strong>{money(summary?.totals.expectedCash ?? 0)}</strong></div>
           <div><span>Total ventas</span><strong>{money(summary?.totals.sales ?? 0)}</strong></div>
         </div>
-        <input name="closingAmount" min="0" type="number" placeholder="Efectivo contado" />
-        <input name="notes" placeholder="Notas de cierre" />
+        <input name="closingAmount" min="0" type="number" placeholder="Efectivo contado" value={cashCounted || ''} onChange={(event) => setCashCounted(Number(event.target.value))} />
+        <input min="0" type="number" placeholder="Voucher / tarjeta contado" value={cardCounted || ''} onChange={(event) => setCardCounted(Number(event.target.value))} />
+        <input min="0" type="number" placeholder="Transferencias contadas" value={transferCounted || ''} onChange={(event) => setTransferCounted(Number(event.target.value))} />
+        <input min="0" type="number" placeholder="QR contado" value={qrCounted || ''} onChange={(event) => setQrCounted(Number(event.target.value))} />
+        <textarea name="notes" placeholder="Nota de descuadre / accion tomada: ej. se revisaron vouchers, transferencia pendiente, faltante asumido, sobrante reportado" rows={3} />
+        <button className="secondary-action" type="button" onClick={() => setShowCloseAudit(true)}>Ver descuadre</button>
         <Button disabled={!cashRegister}>Cerrar turno</Button>
       </form>
+      {showCloseAudit && (
+        <div className="pos-modal-backdrop cashier-close-audit-focus" role="dialog" aria-modal="true" aria-labelledby="cashier-close-audit-title">
+          <section className="pos-modal">
+            <button className="focus-close" type="button" aria-label="Cerrar descuadre" onClick={() => setShowCloseAudit(false)}>X</button>
+            <h2 id="cashier-close-audit-title">Descuadre de cierre</h2>
+            <div className="cash-close-audit-grid">
+              {[
+                ['Efectivo', expected.cash, counted.cash],
+                ['Tarjeta / voucher', expected.card, counted.card],
+                ['Transferencias', expected.transfer, counted.transfer],
+                ['QR', expected.qr, counted.qr]
+              ].map(([label, expectedValue, countedValue]) => {
+                const difference = Number(countedValue) - Number(expectedValue);
+
+                return (
+                  <article className={difference === 0 ? 'balanced' : difference > 0 ? 'surplus' : 'shortage'} key={String(label)}>
+                    <strong>{String(label)}</strong>
+                    <span>Esperado: {money(Number(expectedValue))}</span>
+                    <span>Contado: {money(Number(countedValue))}</span>
+                    <em>{difference === 0 ? 'Cuadra' : `${difference > 0 ? 'Sobra' : 'Falta'} ${money(Math.abs(difference))}`}</em>
+                  </article>
+                );
+              })}
+            </div>
+            <div className={totalDifference === 0 ? 'cashier-selected-charge confirm' : 'cashier-selected-charge warning'}>
+              <span>Descuadre total</span>
+              <strong>{totalDifference === 0 ? 'Caja cuadrada' : money(totalDifference)}</strong>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
+  );
+}
+
+function CashierTableRail({
+  homeRoute,
+  onOpenMenu,
+  onOpenReservation,
+  orders,
+  selectedOrder,
+  onSelect
+}: {
+  homeRoute: string;
+  onOpenMenu: () => void;
+  onOpenReservation: () => void;
+  orders: CashierOrder[];
+  selectedOrder?: CashierOrder;
+  onSelect: (orderId: string) => void;
+}) {
+  return (
+    <aside className="cashier-table-rail" aria-label="Mesas de caja">
+      <div className="cashier-rail-brand">
+        <strong>Saborio</strong>
+        <span>POS CAJERO</span>
+      </div>
+      <div className="cashier-rail-actions" aria-label="Accesos de caja">
+        <button type="button" onClick={() => window.location.assign(homeRoute)}>Dashboard</button>
+        <button type="button" onClick={onOpenMenu}>Menu</button>
+        <button type="button" onClick={onOpenReservation}>Reservas</button>
+      </div>
+      <div className="cashier-rail-title">
+        <span>MESAS</span>
+        <b>{orders.length}</b>
+      </div>
+      <div className="cashier-rail-list">
+        {orders.map((order) => {
+          const statusClass = cashierTableStatusClass(order);
+          const isActive = order.id === selectedOrder?.id;
+
+          return (
+            <button
+              aria-pressed={isActive}
+              className={`cashier-rail-item ${statusClass} ${isActive ? 'active' : ''}`}
+              key={order.id}
+              type="button"
+              onClick={() => onSelect(order.id)}
+            >
+              <strong>{order.table.number}</strong>
+              <span>{order.table.name || `Mesa ${order.table.number}`}</span>
+              <small>{order.table.capacity ?? 0} pax</small>
+              <em>{cashierTableStatusLabel(order)}</em>
+            </button>
+          );
+        })}
+        {orders.length === 0 && (
+          <div className="cashier-rail-empty">
+            <strong>Sin mesas</strong>
+            <span>Cuando pidan cuenta apareceran aqui.</span>
+          </div>
+        )}
+      </div>
+      <button className="cashier-rail-link" type="button" onClick={() => document.getElementById('pending-orders')?.scrollIntoView({ behavior: 'smooth' })}>
+        Ver toda la cola
+      </button>
+    </aside>
   );
 }
 
@@ -285,26 +532,31 @@ function PendingPaymentTableCard({
   onSelect: (orderId: string) => void;
   order: CashierOrder;
 }) {
-  const buttonLabel = isPreparingCheckout
-    ? 'Preparando cobro...'
-    : isWaitingPaymentOrder(order)
-      ? 'Cobrar'
-      : 'Pasar a cuenta y cobrar';
+  const buttonLabel = isPreparingCheckout ? 'Preparando cobro...' : 'Cobrar';
+  const pendingBalance = Math.max(0, numberValue(order.total) - paidTotal(order));
+  const productCount = order.items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+  const pax = order.table.capacity ?? 0;
+  const statusClass = cashierTableStatusClass(order);
 
   return (
-    <article className={isActive ? 'cashier-order active' : 'cashier-order'}>
+    <article className={isActive ? `cashier-order active ${statusClass}` : `cashier-order ${statusClass}`}>
       <button className="cashier-order-main" type="button" onClick={() => onSelect(order.id)}>
-        <strong>{order.table.name || `Mesa ${order.table.number}`}</strong>
-        <span>Orden {order.orderNumber}</span>
-        <span>Mesero: {waiterName(order)}</span>
-        <span>Abierta: {formatDateTime(orderStartDate(order))}</span>
-        <span>Atencion: {serviceDuration(orderStartDate(order))}</span>
-        <em>{money(Math.max(0, numberValue(order.total) - paidTotal(order)))} pendiente</em>
+        <span className="cashier-order-icon" aria-hidden="true">▣</span>
+        <span className="cashier-order-copy">
+          <strong>{order.table.name || `Mesa ${order.table.number}`}</strong>
+          <span>{cashierTableStatusLabel(order)} · hace {serviceDuration(orderStartDate(order))}</span>
+          <small>Cliente: {customerName(order)}</small>
+          <small>{pax} pax · {productCount} productos · {order.table.diningArea?.name || 'Sin area'}</small>
+        </span>
+        <span className="cashier-order-total">
+          <small>Total</small>
+          <b>{money(pendingBalance)}</b>
+        </span>
       </button>
       <div className="cashier-order-actions">
-        <button type="button" onClick={() => onSelect(order.id)}>Ver cuenta</button>
+        <button type="button" onClick={() => onSelect(order.id)}>Detalle</button>
         <button type="button" onClick={() => void onCharge(order)} disabled={isPreparingCheckout || (cashierConfig.requireOpenCashRegister && !cashRegister)}>
-          {buttonLabel}
+          {isPreparingCheckout ? buttonLabel : 'Atender'}
         </button>
       </div>
     </article>
@@ -331,10 +583,13 @@ function PendingPaymentTables({
   selectedOrder?: CashierOrder;
 }) {
   return (
-    <aside className="panel" id="pending-orders">
+    <aside className="panel cashier-queue-panel" id="pending-orders">
       <div className="section-title">
-        <h2>Mesas pendientes de cobro</h2>
-        <span>Ordenes enviadas por el mesero a cuenta</span>
+        <div>
+          <p className="eyebrow">COLA DE COBRO</p>
+          <h2>Mesas pendientes</h2>
+        </div>
+        <span>{paymentQueue.length} pendientes</span>
       </div>
       <div className="cashier-order-list">
         {paymentQueue.map((order) => (
@@ -349,7 +604,12 @@ function PendingPaymentTables({
             order={order}
           />
         ))}
-        {paymentQueue.length === 0 && <div className="empty-state compact">No hay mesas pendientes de pago.</div>}
+        {paymentQueue.length === 0 && (
+          <div className="empty-state compact">
+            <strong>No hay mesas pendientes de pago.</strong>
+            <span>Cuando un mesero solicite la cuenta, aparecera aqui automaticamente.</span>
+          </div>
+        )}
       </div>
       {reviewOrders.length > 0 && (
         <details className="cashier-review-orders">
@@ -388,13 +648,11 @@ function PreInvoicePanel({
   checkoutButtonLabel = 'Cobrar / Facturar',
   canStartCheckout,
   discountTotal,
-  downloadLink,
-  onDownload,
   onPrint,
-  onSaveTicket,
   onStartCheckout,
   order,
   paid,
+  reservationCredit,
   subtotal,
   taxTotal,
   themeName,
@@ -407,13 +665,11 @@ function PreInvoicePanel({
   checkoutButtonLabel?: string;
   canStartCheckout: boolean;
   discountTotal: number;
-  downloadLink: { fileName: string; html: string; url: string } | null;
-  onDownload: (order: CashierOrder) => void;
   onPrint: (order: CashierOrder) => void;
-  onSaveTicket: () => void;
   onStartCheckout: () => void | Promise<void>;
   order: CashierOrder;
   paid: number;
+  reservationCredit: number;
   subtotal: number;
   taxTotal: number;
   themeName: string;
@@ -434,21 +690,11 @@ function PreInvoicePanel({
             Volver a mesas pendientes
           </button>
           <button className="primary-action" type="button" onClick={() => onPrint(order)}>Imprimir cuenta previa</button>
-          <button className="secondary-action" type="button" onClick={() => onDownload(order)}>Descargar cuenta previa</button>
           <button className="primary-action" type="button" onClick={onStartCheckout} disabled={!canStartCheckout || (cashierConfig.requireOpenCashRegister && !cashRegister)}>
             {checkoutButtonLabel}
           </button>
         </div>
       </header>
-      <div className="cashier-help-note">
-        <strong>Para verla en el PC:</strong>
-        <span>Primero toca Descargar cuenta previa. Luego toca Guardar archivo en Descargas. El archivo queda como cuenta-previa-{order.orderNumber}.html.</span>
-        {downloadLink && (
-          <button className="download-ticket-link" type="button" onClick={onSaveTicket}>
-            Guardar archivo en PC
-          </button>
-        )}
-      </div>
       <div className="customer-account-sheet">
         <div className="account-sheet-head">
           <strong>{themeName || 'Mi Restaurante'}</strong>
@@ -478,11 +724,12 @@ function PreInvoicePanel({
       <div className="ticket-preview-lines">
         <div><span>Subtotal consumo</span><strong>{money(subtotal)}</strong></div>
         <div><span>Descuento aplicado</span><strong>{money(discountTotal)}</strong></div>
+        {reservationCredit > 0 && <div><span>Saldo a favor reserva</span><strong>-{money(reservationCredit)}</strong></div>}
         <div><span>Impuesto</span><strong>{money(taxTotal)}</strong></div>
         <div><span>Pagado antes</span><strong>{money(paid)}</strong></div>
         <div><span>Total sin propina</span><strong>{money(ticketTotalWithoutTip)}</strong></div>
         <div><span>Propina voluntaria sugerida 10%</span><strong>{money(ticketSuggestedTipAmount)}</strong></div>
-        <div className="ticket-pay-now"><span>Total sugerido con propina</span><strong>{money(ticketTotalWithSuggestedTip)}</strong></div>
+        <div className="ticket-pay-now"><span>Total sugerido con propina</span><strong>{money(Math.max(0, ticketTotalWithSuggestedTip - reservationCredit))}</strong></div>
       </div>
       <p>Esta cuenta previa no cierra la mesa. Solo sirve para mostrar al cliente cuanto debe pagar antes de registrar el cobro.</p>
     </section>
@@ -715,6 +962,7 @@ function PaymentSummary({
   paymentAmount,
   paymentMethod,
   previewBalance,
+  reservationCredit,
   subtotal,
   taxTotal,
   tipAmount
@@ -725,6 +973,7 @@ function PaymentSummary({
   paymentAmount: number;
   paymentMethod: PaymentMethod;
   previewBalance: number;
+  reservationCredit: number;
   subtotal: number;
   taxTotal: number;
   tipAmount: number;
@@ -733,6 +982,7 @@ function PaymentSummary({
     <div className="ticket-preview-lines">
       <div><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
       <div><span>Descuento</span><strong>{money(discountTotal)}</strong></div>
+      {reservationCredit > 0 && <div><span>Saldo a favor reserva</span><strong>-{money(reservationCredit)}</strong></div>}
       <div><span>Impuesto</span><strong>{money(taxTotal)}</strong></div>
       <div><span>Propina</span><strong>{money(tipAmount)}</strong></div>
       <div><span>Metodo</span><strong>{paymentMethodLabel(paymentMethod)}</strong></div>
@@ -744,7 +994,7 @@ function PaymentSummary({
 }
 
 function ConfirmPaymentButton({ disabled, isRegisteringPayment }: { disabled: boolean; isRegisteringPayment: boolean }) {
-  return <Button disabled={disabled}>{isRegisteringPayment ? 'Registrando pago...' : 'Confirmar pago y cerrar mesa'}</Button>;
+  return <Button disabled={disabled}>{isRegisteringPayment ? 'Registrando pago...' : 'COBRAR y cerrar mesa'}</Button>;
 }
 
 function CheckoutWizard({
@@ -774,6 +1024,7 @@ function CheckoutWizard({
   paymentAmount,
   paymentMethod,
   previewBalance,
+  reservationCredit,
   subtotal,
   taxTotal,
   tipAmount,
@@ -805,6 +1056,7 @@ function CheckoutWizard({
   paymentAmount: number;
   paymentMethod: PaymentMethod;
   previewBalance: number;
+  reservationCredit: number;
   subtotal: number;
   taxTotal: number;
   tipAmount: number;
@@ -928,6 +1180,7 @@ function CheckoutWizard({
             <div><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
             <div><span>Impuestos</span><strong>{money(taxTotal)}</strong></div>
             <div><span>Descuentos existentes</span><strong>{money(discountTotal)}</strong></div>
+            {reservationCredit > 0 && <div><span>Saldo a favor reserva</span><strong>-{money(reservationCredit)}</strong></div>}
             <div className="ticket-pay-now"><span>Total actual</span><strong>{money(total)}</strong></div>
           </div>
 
@@ -946,6 +1199,7 @@ function CheckoutWizard({
           <div className="checkout-step-total-bar" aria-label="Total actualizado">
             <div><span>Subtotal</span><strong>{money(subtotal)}</strong></div>
             <div><span>Descuento actual</span><strong>{money(discountTotal)}</strong></div>
+            {reservationCredit > 0 && <div><span>Saldo a favor reserva</span><strong>-{money(reservationCredit)}</strong></div>}
             <div><span>Propina seleccionada</span><strong>{money(tipAmount)}</strong></div>
             <div className="ticket-pay-now"><span>Total actualizado</span><strong>{money(previewBalance)}</strong></div>
           </div>
@@ -993,7 +1247,7 @@ function CheckoutWizard({
             <div><span>Mesero</span><strong>{waiterName(order)}</strong></div>
             <div><span>Orden</span><strong>{order.orderNumber}</strong></div>
           </div>
-          <PaymentSummary cashChange={cashChange} discountTotal={discountTotal} mixedPaymentsTotal={mixedPaymentsTotal} paymentAmount={paymentAmount} paymentMethod={paymentMethod} previewBalance={previewBalance} subtotal={subtotal} taxTotal={taxTotal} tipAmount={tipAmount} />
+          <PaymentSummary cashChange={cashChange} discountTotal={discountTotal} mixedPaymentsTotal={mixedPaymentsTotal} paymentAmount={paymentAmount} paymentMethod={paymentMethod} previewBalance={previewBalance} reservationCredit={reservationCredit} subtotal={subtotal} taxTotal={taxTotal} tipAmount={tipAmount} />
           <div className="checkout-confirm-grid">
             <div><span>Método de pago</span><strong>{paymentMethodLabel(paymentMethod)}</strong></div>
             <div>
@@ -1006,10 +1260,8 @@ function CheckoutWizard({
           <input name="amount" type="hidden" value={paymentMethod === 'CASH' ? paymentAmount : previewBalance} />
           <label>
             Estado de la mesa después del pago
-            <select name="closeTableStatus" defaultValue={cashierConfig.afterPaymentTableStatus}>
-              <option value="CLEANING">Mesa a limpieza</option>
-              <option value="AVAILABLE">Mesa disponible</option>
-            </select>
+            <input type="hidden" name="closeTableStatus" value="AVAILABLE" />
+            <div className="cashier-help-note confirm">Al confirmar el pago la mesa queda disponible automaticamente.</div>
           </label>
           <div className="checkout-wizard-actions">
             <button className="secondary-action" type="button" onClick={() => goToCheckoutStep(3)}>Atrás</button>
@@ -1064,11 +1316,11 @@ export default function CashierPage() {
   const [cashRegister, setCashRegister] = useState<CashRegister | null>(null);
   const [orders, setOrders] = useState<CashierOrder[]>([]);
   const [cashierConfig, setCashierConfig] = useState<CashierConfig>({
-    allowCashierRequestPayment: true,
+    allowCashierRequestPayment: false,
     allowCustomTip: true,
     allowMixedPayments: true,
     allowSplitBill: true,
-    afterPaymentTableStatus: 'CLEANING',
+    afterPaymentTableStatus: 'AVAILABLE',
     printReceiptAfterPayment: true,
     requireOpenCashRegister: true,
     showTipOnReceipt: true,
@@ -1087,6 +1339,27 @@ export default function CashierPage() {
   const [finalInvoiceOrder, setFinalInvoiceOrder] = useState<CashierOrder | null>(null);
   const [downloadLink, setDownloadLink] = useState<{ fileName: string; html: string; url: string } | null>(null);
   const [feedback, setFeedback] = useState('');
+  const [cashierSearch, setCashierSearch] = useState('');
+  const [cashierMenuItems, setCashierMenuItems] = useState<CashierMenuItem[]>([]);
+  const [cashierPromotions, setCashierPromotions] = useState<CashierPromotion[]>([]);
+  const [reservedTables, setReservedTables] = useState<CashierReservedTable[]>([]);
+  const [reservableTables, setReservableTables] = useState<CashierReservedTable[]>([]);
+  const [selectedReservation, setSelectedReservation] = useState<CashierReservedTable | null>(null);
+  const [isCashierNavOpen, setIsCashierNavOpen] = useState(false);
+  const [isReservationFocusOpen, setIsReservationFocusOpen] = useState(false);
+  const [isSavingReservation, setIsSavingReservation] = useState(false);
+  const [isCashierMenuOpen, setIsCashierMenuOpen] = useState(false);
+  const [cashierMenuSearch, setCashierMenuSearch] = useState('');
+  const [cashierMenuItemId, setCashierMenuItemId] = useState('');
+  const [cashierMenuQuantity, setCashierMenuQuantity] = useState(1);
+  const [cashierMenuNotes, setCashierMenuNotes] = useState('');
+  const [cashierMenuModifierIds, setCashierMenuModifierIds] = useState<string[]>([]);
+  const [isAddingCashierItem, setIsAddingCashierItem] = useState(false);
+  const [isCancelOrderFocusOpen, setIsCancelOrderFocusOpen] = useState(false);
+  const [isCancellingOrder, setIsCancellingOrder] = useState(false);
+  const [emptyReleaseReason, setEmptyReleaseReason] = useState('');
+  const [isReleasingEmptyOrder, setIsReleasingEmptyOrder] = useState(false);
+  const [paymentSuccessFocus, setPaymentSuccessFocus] = useState(false);
   const [isPreparingCheckoutId, setIsPreparingCheckoutId] = useState('');
   const [isMovingToPayment, setIsMovingToPayment] = useState(false);
   const [isRegisteringPayment, setIsRegisteringPayment] = useState(false);
@@ -1099,15 +1372,36 @@ export default function CashierPage() {
 
   const sortedOrders = useMemo(() => [...orders].sort(compareCashierOrdersByTable), [orders]);
   const paymentQueue = useMemo(() => sortedOrders.filter(isWaitingPaymentOrder), [sortedOrders]);
-  const reviewOrders = useMemo(() => sortedOrders.filter((order) => !isWaitingPaymentOrder(order)), [sortedOrders]);
-  const selectedOrder = orders.find((order) => order.id === selectedOrderId) ?? paymentQueue[0] ?? sortedOrders[0];
+  const filteredPaymentQueue = useMemo(() => {
+    const normalizedSearch = cashierSearch.trim().toLowerCase();
+
+    if (!normalizedSearch) {
+      return paymentQueue;
+    }
+
+    return paymentQueue.filter((order) =>
+      order.table.number.toLowerCase().includes(normalizedSearch) ||
+      order.table.name.toLowerCase().includes(normalizedSearch) ||
+      order.orderNumber.toLowerCase().includes(normalizedSearch) ||
+      customerName(order).toLowerCase().includes(normalizedSearch) ||
+      waiterName(order).toLowerCase().includes(normalizedSearch) ||
+      (order.table.diningArea?.name ?? '').toLowerCase().includes(normalizedSearch)
+    );
+  }, [cashierSearch, paymentQueue]);
+  const reviewOrders = useMemo(() => [] as CashierOrder[], []);
+  const selectedOrder = paymentQueue.find((order) => order.id === selectedOrderId) ?? filteredPaymentQueue[0] ?? paymentQueue[0];
   const subtotal = selectedOrder ? numberValue(selectedOrder.subtotal) : 0;
   const discountTotal = selectedOrder ? numberValue(selectedOrder.discountTotal) : 0;
   const taxTotal = selectedOrder ? numberValue(selectedOrder.taxTotal) : 0;
   const tipTotal = selectedOrder ? numberValue(selectedOrder.tipTotal) : 0;
   const total = selectedOrder ? numberValue(selectedOrder.total) : 0;
   const paid = selectedOrder ? paidTotal(selectedOrder) : 0;
-  const balance = Math.max(0, total - paid);
+  const reservationDepositAmount = selectedOrder ? numberValue(selectedOrder.table.reservation?.depositAmount) : 0;
+  const hasReservationDiscountApplied = selectedOrder?.discounts.some((discount) => discount.name === 'Abono reserva' && numberValue(discount.value) > 0) ?? false;
+  const reservationCreditBase = hasReservationDiscountApplied ? 0 : Math.min(reservationDepositAmount, Math.max(0, subtotal - discountTotal));
+  const reservationTaxRelief = reservationCreditBase * ((cashierConfig.taxRate ?? 0) / 100);
+  const reservationCredit = Math.min(total, reservationCreditBase + reservationTaxRelief);
+  const balance = Math.max(0, total - paid - reservationCredit);
   const suggestedTipAmount = Math.round(balance * 0.1);
   const totalWithoutTip = balance;
   const totalWithSuggestedTip = balance + suggestedTipAmount;
@@ -1123,17 +1417,17 @@ export default function CashierPage() {
   const cashChange = paymentMethod === 'CASH' ? Math.max(0, paymentAmount - previewBalance) : 0;
   const receiptOrder = receiptSnapshot ?? orders.find((order) => order.id === printOrderId);
   const displayedFinalInvoiceOrder = finalInvoiceOrder ?? (selectedOrder?.status === 'PAID' ? selectedOrder : null);
+  const selectedCashierMenuItem = cashierMenuItems.find((item) => item.id === cashierMenuItemId) ?? null;
+  const visibleCashierMenuItems = useMemo(() => {
+    const query = cashierMenuSearch.trim().toLowerCase();
+
+    return cashierMenuItems.filter((item) => !query || item.name.toLowerCase().includes(query) || (item.description ?? '').toLowerCase().includes(query));
+  }, [cashierMenuItems, cashierMenuSearch]);
   const homeRoute = user ? routeForRole(user.role) : '/login';
   const canApplyCheckoutDiscount = user ? ['SUPER_ADMIN', 'ADMIN', 'MANAGER'].includes(user.role) : false;
   const canContinueCheckoutWithPendingItems = user ? ['SUPER_ADMIN', 'ADMIN', 'MANAGER'].includes(user.role) : false;
-  const canRequestPaymentFromCashier = Boolean(
-    selectedOrder &&
-    user &&
-    ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER'].includes(user.role) &&
-    cashierConfig.allowCashierRequestPayment &&
-    canMoveOrderToPayment(selectedOrder)
-  );
-  const canStartCheckout = Boolean(selectedOrder && (isWaitingPaymentOrder(selectedOrder) || canRequestPaymentFromCashier));
+  const canRequestPaymentFromCashier = false;
+  const canStartCheckout = Boolean(selectedOrder && isWaitingPaymentOrder(selectedOrder));
 
   async function fetchWithAuth(path: string, init: RequestInit & { headers?: Record<string, string> } = {}) {
     const storedToken = window.localStorage.getItem('accessToken') ?? accessToken;
@@ -1172,6 +1466,8 @@ export default function CashierPage() {
     }
 
     void loadCashierData();
+    void loadCashierMenu();
+    void loadCashierInsights();
     const interval = window.setInterval(() => void loadCashierData(true), 5000);
 
     return () => window.clearInterval(interval);
@@ -1217,13 +1513,23 @@ export default function CashierPage() {
     return () => window.clearTimeout(timeout);
   }, [feedback]);
 
+  useEffect(() => {
+    if (!paymentSuccessFocus) {
+      return undefined;
+    }
+
+    const timeout = window.setTimeout(() => setPaymentSuccessFocus(false), 3000);
+
+    return () => window.clearTimeout(timeout);
+  }, [paymentSuccessFocus]);
+
   async function loadCashierData(silent = false) {
     if (!accessToken) return;
 
     try {
       const [registerResponse, ordersResponse, configResponse] = await Promise.all([
         fetchWithAuth('/cashier/cash-registers/current'),
-        fetchWithAuth('/cashier/orders/open'),
+        fetchWithAuth('/cash-register/pending-tables'),
         fetchWithAuth('/cashier/config')
       ]);
       const register = registerResponse.status === 204 ? null : await readApi<CashRegister | null>(registerResponse);
@@ -1235,7 +1541,9 @@ export default function CashierPage() {
         const requestedOrderResponse = await fetchWithAuth(`/cashier/orders/${requestedOrderId}`);
         if (requestedOrderResponse.ok) {
           const requestedOrder = await readApi<CashierOrder>(requestedOrderResponse);
-          nextOrders = [requestedOrder, ...nextOrders];
+          if (isWaitingPaymentOrder(requestedOrder)) {
+            nextOrders = [requestedOrder, ...nextOrders];
+          }
         }
       }
 
@@ -1249,7 +1557,7 @@ export default function CashierPage() {
 
         const nextPaymentQueue = [...nextOrders].sort(compareCashierOrdersByTable).filter(isWaitingPaymentOrder);
 
-        return nextOrders.some((order) => order.id === current) ? current : nextPaymentQueue[0]?.id ?? nextOrders[0]?.id ?? '';
+        return nextPaymentQueue.some((order) => order.id === current) ? current : nextPaymentQueue[0]?.id ?? '';
       });
 
       if (register) {
@@ -1330,6 +1638,87 @@ export default function CashierPage() {
     }
   }
 
+  async function loadCashierMenu() {
+    if (!accessToken) return;
+
+    try {
+      const categories = await readApi<CashierMenuCategory[]>(await fetchWithAuth('/menu/available'));
+      const items = categories.flatMap((category) => [
+        ...(category.items ?? []),
+        ...(category.children ?? []).flatMap((child) => child.items ?? [])
+      ]);
+
+      setCashierMenuItems(items);
+    } catch {
+      setFeedback('No se pudo cargar el menu de caja.');
+    }
+  }
+
+  async function loadCashierInsights() {
+    if (!accessToken) return;
+
+    try {
+      const [discountsResponse, reservedResponse, reservableResponse] = await Promise.all([
+        fetchWithAuth('/cashier/discounts'),
+        fetchWithAuth('/cashier/tables/reserved'),
+        fetchWithAuth('/cashier/tables/reservable')
+      ]);
+
+      const discounts = await readApi<CashierPromotion[]>(discountsResponse);
+      const reservations = await readApi<CashierReservedTable[]>(reservedResponse);
+      const reservable = await readApi<CashierReservedTable[]>(reservableResponse);
+
+      setCashierPromotions(discounts.filter((discount) => discount.isActive !== false));
+      setReservedTables(reservations);
+      setReservableTables(reservable);
+    } catch {
+      setCashierPromotions([]);
+      setReservedTables([]);
+      setReservableTables([]);
+    }
+  }
+
+  async function reserveTableFromCashier(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!accessToken) return;
+
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const body = {
+      depositAmount: Number(form.get('depositAmount') ?? 0),
+      email: String(form.get('email') ?? '').trim(),
+      firstName: String(form.get('firstName') ?? '').trim(),
+      guestCount: Number(form.get('guestCount') ?? 0) || undefined,
+      lastName: String(form.get('lastName') ?? '').trim(),
+      notes: String(form.get('notes') ?? '').trim(),
+      phone: String(form.get('phone') ?? '').trim(),
+      reservationDate: String(form.get('reservationDate') ?? '').trim(),
+      tableId: String(form.get('tableId') ?? '')
+    };
+
+    if (!body.tableId || !body.firstName) {
+      setFeedback('Selecciona la mesa y escribe el nombre del cliente para reservar.');
+      return;
+    }
+
+    try {
+      setIsSavingReservation(true);
+      await readApi(await fetchWithAuth('/cashier/tables/reserve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }));
+      formElement.reset();
+      setIsReservationFocusOpen(false);
+      setFeedback('Reserva registrada desde caja. La mesa quedo marcada como reservada.');
+      await loadCashierInsights();
+    } catch (error) {
+      setFeedback(error instanceof Error ? normalizeCashierError(error.message) : 'No se pudo registrar la reserva.');
+    } finally {
+      setIsSavingReservation(false);
+    }
+  }
+
   async function applyDiscount(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!accessToken || !selectedOrder) return;
@@ -1392,7 +1781,7 @@ export default function CashierPage() {
 
     const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
-    const closeTableStatus = String(form.get('closeTableStatus') ?? 'CLEANING') as CloseTableStatus;
+    const closeTableStatus = 'AVAILABLE' as CloseTableStatus;
 
     if (paymentMethod === 'MIXED' && Math.abs(mixedPaymentsTotal - previewBalance) > 0.01) {
       setFeedback('La suma de los pagos no coincide con el total.');
@@ -1451,12 +1840,13 @@ export default function CashierPage() {
       setCheckoutStep(1);
       setSelectedOrderId('');
       if (updatedOrder.status === 'PAID') {
+        setPaymentSuccessFocus(true);
         window.localStorage.setItem(
           'restaurant-order-paid',
           JSON.stringify({
             orderId: updatedOrder.id,
             tableId: updatedOrder.table.id,
-            tableStatus: updatedOrder.table.status || closeTableStatus,
+            tableStatus: 'AVAILABLE',
             paidAt: new Date().toISOString()
           })
         );
@@ -1509,57 +1899,7 @@ export default function CashierPage() {
     }
 
     setDownloadLink({ fileName, html, url });
-    setFeedback(order.status === 'PAID' ? 'Factura final generada. Toca Guardar archivo en PC.' : 'Cuenta previa generada. Toca Guardar archivo en PC.');
-  }
-
-  async function saveTicketFile() {
-    if (!downloadLink) {
-      setFeedback('Primero toca Descargar cuenta previa para generar el archivo.');
-      return;
-    }
-
-    const pickerWindow = window as Window & {
-      showSaveFilePicker?: (options: {
-        suggestedName: string;
-        types: Array<{ description: string; accept: Record<string, string[]> }>;
-      }) => Promise<{ createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }>;
-    };
-    const fileBlob = new Blob([downloadLink.html], { type: 'text/html;charset=utf-8' });
-
-    try {
-      if (pickerWindow.showSaveFilePicker) {
-        const handle = await pickerWindow.showSaveFilePicker({
-          suggestedName: downloadLink.fileName,
-          types: [
-            {
-              description: 'Cuenta previa HTML',
-              accept: { 'text/html': ['.html'] }
-            }
-          ]
-        });
-        const writable = await handle.createWritable();
-        await writable.write(fileBlob);
-        await writable.close();
-        setFeedback(`Archivo guardado correctamente: ${downloadLink.fileName}`);
-        return;
-      }
-
-      const link = document.createElement('a');
-      link.href = downloadLink.url;
-      link.download = downloadLink.fileName;
-      link.rel = 'noopener';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setFeedback(`Descarga solicitada: revisa la carpeta Descargas para ${downloadLink.fileName}.`);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        setFeedback('Guardado cancelado.');
-        return;
-      }
-
-      setFeedback('No se pudo guardar automaticamente. Usa Imprimir cuenta previa y elige Guardar como PDF.');
-    }
+    setFeedback(order.status === 'PAID' ? 'Factura final generada.' : 'Cuenta previa generada para impresion.');
   }
 
   function chooseTipPercentage(percent: number) {
@@ -1610,9 +1950,14 @@ export default function CashierPage() {
     }
 
     if (!isWaitingPaymentOrder(order)) {
+      setFeedback('La cuenta aun no fue solicitada por el mesero.');
+      return;
+    }
+
+    if (false) {
       const canRequestPaymentForOrder = Boolean(
         user &&
-        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER'].includes(user.role) &&
+        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER'].includes(user?.role ?? '') &&
         cashierConfig.allowCashierRequestPayment &&
         canMoveOrderToPayment(order)
       );
@@ -1632,8 +1977,8 @@ export default function CashierPage() {
         setFeedback('Mesa pasada a cuenta. Puedes cobrar ahora.');
         openCheckoutWizardForOrder(updatedOrder);
         return;
-      } catch (error) {
-        setFeedback(error instanceof Error ? normalizeCashierError(error.message) : 'No se pudo pasar la mesa a cuenta.');
+      } catch {
+        setFeedback('No se pudo pasar la mesa a cuenta.');
         return;
       } finally {
         setIsMovingToPayment(false);
@@ -1665,11 +2010,14 @@ export default function CashierPage() {
         return;
       }
 
+      setFeedback('La cuenta aun no fue solicitada por el mesero.');
+      return;
+
       const canRequestPaymentForOrder = Boolean(
         user &&
-        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER'].includes(user.role) &&
+        ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER'].includes(user?.role ?? '') &&
         cashierConfig.allowCashierRequestPayment &&
-        canMoveOrderToPayment(order)
+        canMoveOrderToPayment(order as CashierOrder)
       );
 
       if (!canRequestPaymentForOrder) {
@@ -1678,7 +2026,7 @@ export default function CashierPage() {
       }
 
       setIsMovingToPayment(true);
-      const response = await fetchWithAuth(`/orders/${order.id}/mark-waiting-payment`, { method: 'PATCH' });
+      const response = await fetchWithAuth(`/orders/${order?.id}/mark-waiting-payment`, { method: 'PATCH' });
       const markPaymentResponse = await readApi<{ order: CashierOrder }>(response);
       const updatedOrder = markPaymentResponse.order;
 
@@ -1707,6 +2055,115 @@ export default function CashierPage() {
     setMixedPayments((current) => current.filter((_, paymentIndex) => paymentIndex !== index));
   }
 
+  async function addLastMinuteItemToOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!selectedOrder || !selectedCashierMenuItem) {
+      setFeedback('Selecciona una mesa y un producto.');
+      return;
+    }
+
+    if (!accessToken) {
+      setFeedback('Debes iniciar sesion para agregar productos desde caja.');
+      return;
+    }
+
+    try {
+      setIsAddingCashierItem(true);
+      const updatedOrder = await readApi<CashierOrder>(await fetchWithAuth(`/cashier/orders/${selectedOrder.id}/last-minute-items`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          menuItemId: selectedCashierMenuItem.id,
+          quantity: cashierMenuQuantity,
+          notes: cashierMenuNotes,
+          modifiers: cashierMenuModifierIds.map((modifierId) => ({ modifierId }))
+        })
+      }));
+
+      setOrders((current) => current.map((order) => order.id === updatedOrder.id ? updatedOrder : order));
+      setSelectedOrderId(updatedOrder.id);
+      setIsCashierMenuOpen(false);
+      setCashierMenuItemId('');
+      setCashierMenuQuantity(1);
+      setCashierMenuNotes('');
+      setCashierMenuModifierIds([]);
+      setFeedback('Producto agregado a la cuenta desde caja.');
+      await loadCashierData(true);
+    } catch (error) {
+      setFeedback(error instanceof Error ? normalizeCashierError(error.message) : 'No se pudo agregar el producto a la cuenta.');
+    } finally {
+      setIsAddingCashierItem(false);
+    }
+  }
+
+  async function releaseEmptySelectedOrder() {
+    if (!selectedOrder) {
+      setFeedback('Selecciona una mesa para liberar.');
+      return;
+    }
+
+    if (!emptyReleaseReason.trim()) {
+      setFeedback('Escribe una nota para liberar la mesa sin consumo.');
+      return;
+    }
+
+    try {
+      setIsReleasingEmptyOrder(true);
+      await readApi<CashierOrder>(await fetchWithAuth(`/cashier/orders/${selectedOrder.id}/release-empty`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: emptyReleaseReason })
+      }));
+      setOrders((current) => current.filter((order) => order.id !== selectedOrder.id));
+      setSelectedOrderId('');
+      setEmptyReleaseReason('');
+      setFeedback('Mesa liberada sin consumo con nota de caja.');
+      await loadCashierData(true);
+    } catch (error) {
+      setFeedback(error instanceof Error ? normalizeCashierError(error.message) : 'No se pudo liberar la mesa sin consumo.');
+    } finally {
+      setIsReleasingEmptyOrder(false);
+    }
+  }
+
+  async function cancelAuthorizedSelectedOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!selectedOrder) {
+      setFeedback('Selecciona una mesa para eliminar el pedido.');
+      return;
+    }
+
+    const form = new FormData(event.currentTarget);
+    const reason = String(form.get('reason') ?? '').trim();
+    const authorizedBy = String(form.get('authorizedBy') ?? '').trim();
+
+    if (!reason || !authorizedBy) {
+      setFeedback('Debes escribir el motivo y quien autoriza la eliminacion.');
+      return;
+    }
+
+    try {
+      setIsCancellingOrder(true);
+      await readApi<CashierOrder>(await fetchWithAuth(`/cashier/orders/${selectedOrder.id}/cancel-authorized`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ authorizedBy, reason })
+      }));
+      setOrders((current) => current.filter((order) => order.id !== selectedOrder.id));
+      setSelectedOrderId('');
+      setCheckoutStarted(false);
+      setIsCancelOrderFocusOpen(false);
+      setFeedback('Pedido eliminado con autorizacion. La mesa quedo disponible.');
+      await loadCashierData(true);
+    } catch (error) {
+      setFeedback(error instanceof Error ? normalizeCashierError(error.message) : 'No se pudo eliminar el pedido.');
+    } finally {
+      setIsCancellingOrder(false);
+    }
+  }
+
   function goToCheckoutStep(step: CheckoutStep) {
     setCheckoutStep(step);
     window.setTimeout(() => document.getElementById('payment-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
@@ -1718,19 +2175,43 @@ export default function CashierPage() {
   }
 
   return (
-    <AuthGate allowedRoles={['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER']}>
+    <AuthGate allowedRoles={['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'CASHIER']} unauthorizedMessage="No tienes permiso para acceder a Caja.">
       <main className="cashier-shell">
-        <header className="topbar">
+        <header className="topbar cashier-pos-topbar">
+          <button className="cashier-mobile-menu" type="button" aria-label="Menu de caja" onClick={() => setIsCashierNavOpen((current) => !current)}>
+            Menu
+          </button>
+          {isCashierNavOpen && (
+            <nav className="cashier-nav-popover" aria-label="Navegacion de caja">
+              <button type="button" onClick={() => window.location.assign(homeRoute)}>Dashboard</button>
+              <button type="button" onClick={() => selectedOrder ? setIsCashierMenuOpen(true) : setFeedback('Selecciona una mesa para abrir el menu.')}>Menu</button>
+              <button type="button" onClick={() => setIsReservationFocusOpen(true)}>Registrar reserva</button>
+              <button type="button" onClick={() => document.getElementById('pending-orders')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>Cola de cobro</button>
+              <button type="button" onClick={() => document.getElementById('cashier-day-movements')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>Movimientos</button>
+            </nav>
+          )}
           <div>
             <nav className="breadcrumb" aria-label="Ruta">
               <button type="button" onClick={() => window.location.assign(homeRoute)}>Inicio</button>
               <span>/</span>
               <strong>Caja</strong>
             </nav>
-            <p className="eyebrow">Fase 9</p>
-            <h1>Caja operativa</h1>
-            <span className="screen-action">Abrir caja, cobrar mesas reales, registrar pagos y cerrar turno.</span>
+            <p className="eyebrow">POS CAJERO</p>
+            <h1>Caja POS</h1>
+            <span className="screen-action">Rail lateral + cola de cobro + detalle de pago.</span>
           </div>
+          <label className="cashier-global-search">
+            <span>⌕</span>
+            <input
+              value={cashierSearch}
+              onChange={(event) => setCashierSearch(event.target.value)}
+              placeholder="Buscar mesa, cliente o ticket..."
+            />
+          </label>
+          <select className="cashier-turn-select" defaultValue="all">
+            <option value="all">Todos los turnos</option>
+            <option value="current">Turno actual</option>
+          </select>
           <button className="back-button" type="button" onClick={() => document.getElementById('pending-orders')?.scrollIntoView({ behavior: 'smooth' })}>
             &lt;- Volver a ordenes
           </button>
@@ -1743,13 +2224,29 @@ export default function CashierPage() {
           </div>
         </header>
         {feedback && <div className="pos-feedback">{feedback}</div>}
+        {paymentSuccessFocus && (
+          <ActionResultFocus
+            description="La cuenta fue cerrada y la mesa quedo habilitada."
+            title="Pago registrado correctamente"
+            onClose={() => setPaymentSuccessFocus(false)}
+          />
+        )}
         <CashierDashboard>
 
         {!cashRegister && cashierConfig.requireOpenCashRegister && <OpenCashRegisterPanel onOpen={openRegister} />}
 
         {(cashRegister || !cashierConfig.requireOpenCashRegister) && (
           <>
-        <CashRegisterStatusCard cashRegister={cashRegister} currentUserEmail={user?.email} onClose={closeRegister} summary={summary} />
+        <CashRegisterStatusCard
+          cashRegister={cashRegister}
+          currentUserEmail={user?.email}
+          onOpenReservation={() => setIsReservationFocusOpen(true)}
+          onSelectReservation={setSelectedReservation}
+          onClose={closeRegister}
+          promotions={cashierPromotions}
+          reservedTables={reservedTables}
+          summary={summary}
+        />
 
         <section className="cashier-flow-header" aria-label="Flujo de cobro">
           <article aria-current="step" className="active">
@@ -1782,13 +2279,27 @@ export default function CashierPage() {
           <button type="button" onClick={() => document.getElementById('cashier-day-movements')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
             Ver movimientos del dia
           </button>
+          <button type="button" onClick={() => selectedOrder ? setIsCashierMenuOpen(true) : setFeedback('Selecciona una mesa para abrir el menu.')}>
+            Menu
+          </button>
+          <button type="button" onClick={() => setIsReservationFocusOpen(true)}>
+            Reservar mesa
+          </button>
         </section>
 
         {!cashRegister && cashierConfig.requireOpenCashRegister && (
           <div className="cashier-blocked-banner">Debes abrir caja antes de cobrar.</div>
         )}
 
-        <section className="cashier-layout">
+        <section className="cashier-layout cashier-pos-layout">
+          <CashierTableRail
+            homeRoute={homeRoute}
+            onOpenMenu={() => selectedOrder ? setIsCashierMenuOpen(true) : setFeedback('Selecciona una mesa para abrir el menu.')}
+            onOpenReservation={() => setIsReservationFocusOpen(true)}
+            orders={filteredPaymentQueue}
+            selectedOrder={selectedOrder}
+            onSelect={setSelectedOrderId}
+          />
           <PendingPaymentTables
             cashRegister={cashRegister}
             cashierConfig={cashierConfig}
@@ -1798,12 +2309,12 @@ export default function CashierPage() {
               void startCheckoutForOrder(order);
             }}
             onSelect={setSelectedOrderId}
-            paymentQueue={paymentQueue}
+            paymentQueue={filteredPaymentQueue}
             reviewOrders={reviewOrders}
             selectedOrder={selectedOrder}
           />
 
-          <section className="panel cashier-detail">
+          <section className="panel cashier-detail cashier-payment-detail">
             {selectedOrder ? (
               <>
                 <div className="section-title">
@@ -1812,8 +2323,13 @@ export default function CashierPage() {
                     <span>{selectedOrder.orderNumber} - {selectedOrder.status}</span>
                   </div>
                   <div className="cashier-inline-actions">
-                    <button className="secondary-action" type="button" onClick={() => window.location.assign(`/mesero/pedidos?tableId=${selectedOrder.table.id}`)}>
-                      Editar pedido antes de cobrar
+                    <button
+                      className="secondary-action"
+                      type="button"
+                      onClick={() => setIsCashierMenuOpen(true)}
+                      disabled={!selectedOrder || selectedOrder.status === 'PAID'}
+                    >
+                      Menu
                     </button>
                     <button
                       className="primary-action"
@@ -1821,14 +2337,33 @@ export default function CashierPage() {
                       onClick={prepareSelectedTableInvoice}
                       disabled={!canStartCheckout || isMovingToPayment || (cashierConfig.requireOpenCashRegister && !cashRegister)}
                     >
-                      {isWaitingPaymentOrder(selectedOrder)
-                        ? 'Cobrar / Facturar'
-                        : isMovingToPayment
-                          ? 'Pasando a cuenta...'
-                          : 'Pasar a cuenta y cobrar'}
+                      COBRAR
+                    </button>
+                    <button
+                      className="danger-action"
+                      type="button"
+                      disabled={!selectedOrder || selectedOrder.status === 'PAID'}
+                      onClick={() => setIsCancelOrderFocusOpen(true)}
+                    >
+                      Eliminar pedido
                     </button>
                   </div>
                 </div>
+                {!selectedOrder.items.some((item) => item.status !== 'CANCELLED') && (
+                  <div className="cashier-help-note warning empty-order-release-panel">
+                    <strong>Mesa enviada sin productos.</strong>
+                    <span>No se puede cerrar ni cobrar una cuenta vacia. Si fue enviada por error, caja puede liberar la mesa dejando una nota.</span>
+                    <textarea
+                      value={emptyReleaseReason}
+                      onChange={(event) => setEmptyReleaseReason(event.target.value)}
+                      placeholder="Nota: mesa enviada por error, cliente se retiro sin consumir, se libera por caja..."
+                      rows={3}
+                    />
+                    <button className="danger-action" disabled={isReleasingEmptyOrder} type="button" onClick={() => void releaseEmptySelectedOrder()}>
+                      {isReleasingEmptyOrder ? 'Liberando...' : 'Liberar mesa sin consumo'}
+                    </button>
+                  </div>
+                )}
                 {!isWaitingPaymentOrder(selectedOrder) && (
                   <div className={canRequestPaymentFromCashier ? 'cashier-help-note' : 'cashier-help-note warning'}>
                     <strong>{canRequestPaymentFromCashier ? 'Esta mesa aún no tiene cuenta solicitada.' : 'La cuenta aún no fue solicitada por el mesero.'}</strong>
@@ -1850,15 +2385,13 @@ export default function CashierPage() {
                   cashRegister={cashRegister}
                   cashierConfig={cashierConfig}
                   canStartCheckout={canStartCheckout && !isMovingToPayment}
-                  checkoutButtonLabel={isWaitingPaymentOrder(selectedOrder) ? 'Cobrar / Facturar' : isMovingToPayment ? 'Pasando a cuenta...' : 'Pasar a cuenta y cobrar'}
+                  checkoutButtonLabel="COBRAR"
                   discountTotal={discountTotal}
-                  downloadLink={downloadLink}
-                  onDownload={downloadTicket}
                   onPrint={printReceipt}
-                  onSaveTicket={() => void saveTicketFile()}
                   onStartCheckout={prepareSelectedTableInvoice}
                   order={selectedOrder}
                   paid={paid}
+                  reservationCredit={reservationCredit}
                   subtotal={subtotal}
                   taxTotal={taxTotal}
                   themeName={theme.restaurantName}
@@ -1902,6 +2435,7 @@ export default function CashierPage() {
                     paymentAmount={paymentAmount}
                     paymentMethod={paymentMethod}
                     previewBalance={previewBalance}
+                    reservationCredit={reservationCredit}
                     subtotal={subtotal}
                     taxTotal={taxTotal}
                     tipAmount={tipAmount}
@@ -2098,10 +2632,8 @@ export default function CashierPage() {
                         <input name="amount" type="hidden" value={paymentMethod === 'CASH' ? paymentAmount : previewBalance} />
                         <label>
                           Estado de la mesa despues del pago
-            <select name="closeTableStatus" defaultValue={cashierConfig.afterPaymentTableStatus}>
-                            <option value="CLEANING">Mesa a limpieza</option>
-                            <option value="AVAILABLE">Mesa disponible</option>
-                          </select>
+            <input type="hidden" name="closeTableStatus" value="AVAILABLE" />
+            <div className="cashier-help-note confirm">Al confirmar el pago la mesa queda disponible automaticamente.</div>
                         </label>
                         <Button disabled={(cashierConfig.requireOpenCashRegister && !cashRegister) || !selectedOrder || isRegisteringPayment || selectedOrder.status === 'PAID'}>
                           {isRegisteringPayment ? 'Registrando pago...' : 'Confirmar pago y cerrar mesa'}
@@ -2118,7 +2650,7 @@ export default function CashierPage() {
                       <span>Cuando el cliente confirme la cuenta, inicia el cobro guiado.</span>
                     </div>
                     <button className="primary-action" type="button" onClick={prepareSelectedTableInvoice} disabled={!isWaitingPaymentOrder(selectedOrder)}>
-                      Cobrar / Facturar
+                      COBRAR
                     </button>
                   </section>
                 )}
@@ -2175,6 +2707,238 @@ export default function CashierPage() {
 
         {displayedFinalInvoiceOrder && <FinalReceiptPanel onDownload={downloadTicket} onPrint={printReceipt} order={displayedFinalInvoiceOrder} />}
         </CashierDashboard>
+
+        {isCancelOrderFocusOpen && selectedOrder && (
+          <div className="pos-modal-backdrop cashier-cancel-focus" role="dialog" aria-modal="true" aria-labelledby="cashier-cancel-title">
+            <section className="pos-modal cashier-cancel-modal">
+              <button className="focus-close" type="button" aria-label="Cerrar eliminacion" onClick={() => setIsCancelOrderFocusOpen(false)}>
+                X
+              </button>
+              <div className="section-title">
+                <div>
+                  <p className="eyebrow">Cancelacion autorizada</p>
+                  <h2 id="cashier-cancel-title">Eliminar pedido Mesa {selectedOrder.table.number}</h2>
+                </div>
+                <span>Usar solo por error operativo, factura equivocada o autorizacion administrativa.</span>
+              </div>
+              <div className="cashier-selected-charge danger">
+                <span>Total actual</span>
+                <strong>{money(numberValue(selectedOrder.total))}</strong>
+              </div>
+              <form className="cashier-cancel-form" onSubmit={cancelAuthorizedSelectedOrder}>
+                <label>
+                  Nombre de quien autoriza
+                  <input name="authorizedBy" placeholder="Ej: Maria Gomez - Administradora" required />
+                </label>
+                <label>
+                  Motivo de eliminacion
+                  <textarea name="reason" rows={4} placeholder="Describe el error, autorizacion o situacion por la que se elimina este pedido" required />
+                </label>
+                <div className="pos-modal-actions">
+                  <button className="secondary-action" type="button" onClick={() => setIsCancelOrderFocusOpen(false)}>Volver</button>
+                  <button className="danger-action" disabled={isCancellingOrder} type="submit">
+                    {isCancellingOrder ? 'Eliminando...' : 'Confirmar eliminacion'}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+
+        {isCashierMenuOpen && selectedOrder && (
+          <div className="pos-modal-backdrop cashier-menu-focus" role="dialog" aria-modal="true" aria-labelledby="cashier-menu-title">
+            <section className="pos-modal cashier-menu-modal">
+              <button className="focus-close" type="button" aria-label="Cerrar menu" onClick={() => setIsCashierMenuOpen(false)}>
+                X
+              </button>
+              <div className="section-title">
+                <div>
+                  <p className="eyebrow">Producto de ultima hora</p>
+                  <h2 id="cashier-menu-title">Menu para Mesa {selectedOrder.table.number}</h2>
+                </div>
+                <span>Se agrega a la cuenta, sin enviar a cocina.</span>
+              </div>
+              <input value={cashierMenuSearch} onChange={(event) => setCashierMenuSearch(event.target.value)} placeholder="Buscar plato, bebida o adicional..." />
+              <div className="cashier-menu-grid">
+                <div className="cashier-menu-list">
+                  {visibleCashierMenuItems.map((item) => (
+                    <button
+                      className={item.id === cashierMenuItemId ? 'active' : ''}
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        setCashierMenuItemId(item.id);
+                        setCashierMenuModifierIds([]);
+                      }}
+                    >
+                      <strong>{item.name}</strong>
+                      <span>{item.description || 'Producto disponible'}</span>
+                      <em>{money(numberValue(item.price))}</em>
+                    </button>
+                  ))}
+                  {visibleCashierMenuItems.length === 0 && <div className="empty-state compact">No hay productos con esta busqueda.</div>}
+                </div>
+                <form className="cashier-menu-form" onSubmit={addLastMinuteItemToOrder}>
+                  {selectedCashierMenuItem ? (
+                    <>
+                      <strong>{selectedCashierMenuItem.name}</strong>
+                      <label>
+                        Cantidad
+                        <input min="1" type="number" value={cashierMenuQuantity} onChange={(event) => setCashierMenuQuantity(Number(event.target.value))} />
+                      </label>
+                      <label>
+                        Preparacion / notas
+                        <input value={cashierMenuNotes} onChange={(event) => setCashierMenuNotes(event.target.value)} placeholder="Ej: para llevar, sin hielo, termino medio" />
+                      </label>
+                      {(selectedCashierMenuItem.modifiers ?? []).length > 0 && (
+                        <div className="modifier-list">
+                          <strong className="modifier-list-title">Adicionales del producto</strong>
+                          {(selectedCashierMenuItem.modifiers ?? []).map((modifier) => (
+                            <label key={modifier.id}>
+                              <input
+                                checked={cashierMenuModifierIds.includes(modifier.id)}
+                                type="checkbox"
+                                onChange={() => setCashierMenuModifierIds((current) => current.includes(modifier.id) ? current.filter((id) => id !== modifier.id) : [...current, modifier.id])}
+                              />
+                              <span>{modifier.name}</span>
+                              <em>{numberValue(modifier.priceDelta ?? modifier.price) > 0 ? money(numberValue(modifier.priceDelta ?? modifier.price)) : 'Sin costo'}</em>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                      <Button disabled={isAddingCashierItem || !selectedCashierMenuItem}>
+                        {isAddingCashierItem ? 'Agregando...' : 'Agregar a la cuenta'}
+                      </Button>
+                    </>
+                  ) : (
+                    <div className="empty-state compact">Selecciona un producto del menu.</div>
+                  )}
+                </form>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {isReservationFocusOpen && (
+          <div className="pos-modal-backdrop cashier-reservation-focus" role="dialog" aria-modal="true" aria-labelledby="cashier-reservation-title">
+            <section className="pos-modal cashier-reservation-modal">
+              <button className="focus-close" type="button" aria-label="Cerrar reserva" onClick={() => setIsReservationFocusOpen(false)}>
+                X
+              </button>
+              <div className="section-title">
+                <div>
+                  <p className="eyebrow">Reservas desde caja</p>
+                  <h2 id="cashier-reservation-title">Registrar cliente y reservar mesa</h2>
+                </div>
+                <span>El abono queda guardado en la nota del cliente mientras se activa un modulo formal de abonos.</span>
+              </div>
+              <form className="cashier-reservation-form" onSubmit={reserveTableFromCashier}>
+                <label>
+                  Mesa
+                  <select name="tableId" required defaultValue="">
+                    <option value="" disabled>Seleccionar mesa</option>
+                    {reservableTables.map((table) => (
+                      <option key={table.id} value={table.id}>
+                        Mesa {table.number} - {table.capacity} pax - {table.status === 'RESERVED' ? 'Reservada' : 'Disponible'}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Nombre cliente
+                  <input name="firstName" placeholder="Nombre" required />
+                </label>
+                <label>
+                  Apellido
+                  <input name="lastName" placeholder="Apellido" />
+                </label>
+                <label>
+                  Telefono
+                  <input name="phone" placeholder="Celular o WhatsApp" />
+                </label>
+                <label>
+                  Correo
+                  <input name="email" type="email" placeholder="cliente@correo.com" />
+                </label>
+                <label>
+                  Fecha y hora
+                  <input name="reservationDate" type="datetime-local" />
+                </label>
+                <label>
+                  Personas
+                  <input name="guestCount" min="1" type="number" placeholder="Ej: 4" />
+                </label>
+                <label>
+                  Abono
+                  <input name="depositAmount" min="0" type="number" placeholder="Ej: 50000" />
+                </label>
+                <label className="full-span">
+                  Nota
+                  <textarea name="notes" rows={3} placeholder="Ocasion, condiciones, quien recibio el abono o detalle del cliente" />
+                </label>
+                <div className="cashier-reservation-actions">
+                  <button className="secondary-action" type="button" onClick={() => setIsReservationFocusOpen(false)}>Cancelar</button>
+                  <Button disabled={isSavingReservation}>{isSavingReservation ? 'Guardando reserva...' : 'Registrar reserva'}</Button>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
+
+        {selectedReservation && (
+          <div className="pos-modal-backdrop cashier-reservation-focus" role="dialog" aria-modal="true" aria-labelledby="cashier-reservation-detail-title">
+            <section className="pos-modal cashier-reservation-modal">
+              <button className="focus-close" type="button" aria-label="Cerrar detalle de reserva" onClick={() => setSelectedReservation(null)}>
+                X
+              </button>
+              <div className="section-title">
+                <div>
+                  <p className="eyebrow">Detalle de reserva</p>
+                  <h2 id="cashier-reservation-detail-title">Mesa {selectedReservation.number}</h2>
+                </div>
+                <span>{selectedReservation.diningArea?.name ?? 'Sin area'} - {selectedReservation.capacity} pax</span>
+              </div>
+              <div className="cashier-reservation-detail-grid">
+                <article>
+                  <span>Cliente</span>
+                  <strong>{selectedReservation.reservation?.customerName || 'Cliente sin nombre'}</strong>
+                </article>
+                <article>
+                  <span>Abono recibido</span>
+                  <strong>{money(numberValue(selectedReservation.reservation?.depositAmount))}</strong>
+                </article>
+                <article>
+                  <span>Personas</span>
+                  <strong>Reservado para {selectedReservation.reservation?.guestCount ?? selectedReservation.capacity} personas</strong>
+                </article>
+                <article>
+                  <span>Fecha reserva</span>
+                  <strong>{selectedReservation.reservation?.reservationDate || 'Sin fecha registrada'}</strong>
+                </article>
+                <article>
+                  <span>Telefono</span>
+                  <strong>{selectedReservation.reservation?.phone || 'Sin telefono'}</strong>
+                </article>
+                <article>
+                  <span>Correo</span>
+                  <strong>{selectedReservation.reservation?.email || 'Sin correo'}</strong>
+                </article>
+                <article className="full-span">
+                  <span>Nota</span>
+                  <strong>{selectedReservation.reservation?.notes || 'Sin notas adicionales'}</strong>
+                </article>
+                <article className="full-span">
+                  <span>Registro</span>
+                  <strong>{selectedReservation.reservation?.registeredAt ? formatDateTime(selectedReservation.reservation.registeredAt) : 'Sin registro'}</strong>
+                </article>
+              </div>
+              <div className="cashier-reservation-actions">
+                <button className="secondary-action" type="button" onClick={() => setIsReservationFocusOpen(true)}>Nueva reserva</button>
+                <button className="primary-action" type="button" onClick={() => setSelectedReservation(null)}>Entendido</button>
+              </div>
+            </section>
+          </div>
+        )}
 
         {receiptOrder && (
           <section className="receipt-print" aria-label="Recibo basico">

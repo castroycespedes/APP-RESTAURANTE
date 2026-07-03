@@ -51,6 +51,7 @@ export interface WaiterTable {
 export interface MenuCategory {
   id: string;
   name: string;
+  parentId?: string | null;
 }
 
 export interface Modifier {
@@ -67,6 +68,7 @@ export interface MenuItem {
   name: string;
   description: string;
   price: number;
+  imageUrl?: string;
   preparationTimeMinutes: number;
   isAvailable: boolean;
 }
@@ -161,6 +163,75 @@ export function TableStatusBadge({ meta, status }: { meta: StatusMeta; status: V
   );
 }
 
+export function OperationalFocus({
+  canGoBack = false,
+  children,
+  footer,
+  subtitle,
+  title,
+  onBack,
+  onClose
+}: {
+  canGoBack?: boolean;
+  children: ReactNode;
+  footer?: ReactNode;
+  subtitle?: string;
+  title: string;
+  onBack?: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="operational-focus-backdrop" role="dialog" aria-modal="true" aria-labelledby="operational-focus-title">
+      <section className="operational-focus">
+        <header className="focus-header">
+          {canGoBack && (
+            <button className="focus-back" type="button" aria-label="Volver al foco anterior" onClick={onBack}>
+              &lt;
+            </button>
+          )}
+          <div>
+            <p className="eyebrow">Foco operativo</p>
+            <h2 id="operational-focus-title">{title}</h2>
+            {subtitle && <span>{subtitle}</span>}
+          </div>
+          <button className="focus-close" type="button" aria-label="Cerrar foco" onClick={onClose}>
+            X
+          </button>
+        </header>
+        <div className="focus-body">{children}</div>
+        {footer && <footer className="focus-footer">{footer}</footer>}
+      </section>
+    </div>
+  );
+}
+
+export function ActionResultFocus({
+  description,
+  isError = false,
+  title,
+  onClose
+}: {
+  description?: string;
+  isError?: boolean;
+  title: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="action-result-backdrop" role="dialog" aria-modal="true" aria-labelledby="action-result-title">
+      <section className={isError ? 'action-result-focus error' : 'action-result-focus'}>
+        <span className="action-result-icon" aria-hidden="true">
+          {isError ? '!' : 'OK'}
+        </span>
+        <h2 id="action-result-title">{title}</h2>
+        {description && <p>{description}</p>}
+        <button className="primary-action" type="button" onClick={onClose}>
+          Continuar
+        </button>
+      </section>
+    </div>
+  );
+}
+
 export function TableCard({
   isActive,
   meta,
@@ -180,23 +251,45 @@ export function TableCard({
   visualStatus: VisualTableStatus;
 }) {
   const tableLabel = table.name?.trim() || `Mesa ${table.number}`;
+  const statusClass = visualStatus.toLowerCase().replaceAll('_', '-');
+  const waiterLabel = table.assignedWaiterName?.trim() || 'Sin mesero';
+  const elapsed = occupiedSince ? elapsedLabel(occupiedSince) : '00:00';
 
   return (
     <button
+      aria-label={`${tableLabel}, ${meta.label}, ${table.capacity} personas`}
       aria-current={isActive ? 'true' : undefined}
       aria-pressed={isActive}
-      className={`waiter-table-card square ${visualStatus.toLowerCase().replaceAll('_', '-')} ${isActive ? 'active' : ''}`}
+      className={`waiter-table-card ${table.shape.toLowerCase()} ${statusClass} ${isActive ? 'active' : ''}`}
       style={{ borderColor: table.color }}
       type="button"
       onClick={onSelect}
     >
-      <strong>{tableLabel}</strong>
-      <TableStatusBadge meta={meta} status={visualStatus} />
-      <small>{table.area}</small>
-      <small>{table.capacity} personas</small>
-      {total !== undefined && total > 0 && <small>{money(total)}</small>}
-      {table.openOrderStatus && <small>{table.openOrderStatus}</small>}
-      {occupiedSince && <small>{elapsedLabel(occupiedSince)}</small>}
+      <span className="waiter-card-head">
+        <span className="waiter-table-number">{table.number}</span>
+        <span className="waiter-card-chevron" aria-hidden="true">›</span>
+      </span>
+      <span className="waiter-table-status">
+        <i className={`status-dot ${statusClass}`} />
+        {meta.label}
+      </span>
+      <span className="waiter-card-visual" aria-hidden="true">
+        <span className="table-chair top" />
+        <span className="table-chair right" />
+        <span className="table-chair bottom" />
+        <span className="table-chair left" />
+        <span className="waiter-table-surface" />
+      </span>
+      <strong title={tableLabel}>{tableLabel}</strong>
+      <span className="waiter-table-meta">
+        <small>{table.capacity} pax</small>
+        <small>{waiterLabel}</small>
+        <small>{elapsed}</small>
+      </span>
+      <span className="waiter-table-total">
+        <b>{total !== undefined && total > 0 ? money(total) : '$0'}</b>
+        <small>Total consumido</small>
+      </span>
     </button>
   );
 }
@@ -397,7 +490,9 @@ export function OrderSummary({
   table,
   waiterName,
   isSendingKitchen = false,
+  isMarkingServed = false,
   isRequestingPayment = false,
+  onMarkServed,
   onRequestBill,
   onSendToKitchen,
   onRemoveItem,
@@ -411,7 +506,9 @@ export function OrderSummary({
   table?: WaiterTable | null;
   waiterName: string;
   isSendingKitchen?: boolean;
+  isMarkingServed?: boolean;
   isRequestingPayment?: boolean;
+  onMarkServed: () => void;
   onRequestBill: () => void;
   onSendToKitchen: () => void;
   onRemoveItem: (itemId: string) => void;
@@ -425,6 +522,7 @@ export function OrderSummary({
     .filter((group) => group.items.length > 0);
   const discountTotal = 0;
   const total = subtotal - discountTotal;
+  const deliverableItemsCount = activeOrder.items.filter((item) => item.status === 'SENT' || item.status === 'PREPARING' || item.status === 'READY').length;
 
   return (
     <>
@@ -457,14 +555,18 @@ export function OrderSummary({
             {group.items.map((item) => {
               const canEditPending = item.status === 'PENDING';
               const canCancelSent = item.status !== 'PENDING' && item.status !== 'SERVED' && item.status !== 'CANCELLED';
+              const hasModifiers = item.modifiers.length > 0;
+              const hasNotes = item.notes.trim().length > 0;
 
               return (
                 <article className="order-item" key={item.id}>
-                  <div>
+                  <div className="order-item-main">
                     <strong>{item.name}</strong>
                     <span>Cantidad: {item.quantity} - Unitario: {money(item.unitPrice)}</span>
-                    <span>Adicionales: {item.modifiers.map((modifier) => modifier.name).join(', ') || 'Sin adicionales'}</span>
-                    <span>Notas: {item.notes || 'Sin notas'}</span>
+                    <div className={hasModifiers || hasNotes ? 'order-item-prep has-detail' : 'order-item-prep'}>
+                      <span><b>Preparacion:</b> {hasNotes ? item.notes : 'Sin instrucciones especiales'}</span>
+                      <span><b>Adicionales del producto:</b> {hasModifiers ? item.modifiers.map((modifier) => modifier.name).join(', ') : 'Sin adicionales'}</span>
+                    </div>
                   </div>
                   <div className="quantity-control">
                     <button type="button" disabled={!canEditPending} onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}>
@@ -506,8 +608,16 @@ export function OrderSummary({
           isSending={isSendingKitchen}
           onSend={onSendToKitchen}
         />
+        <button
+          className="served-action"
+          disabled={orderLocked || orderWaitingPayment || isMarkingServed || deliverableItemsCount === 0}
+          type="button"
+          onClick={onMarkServed}
+        >
+          {isMarkingServed ? 'Marcando...' : `Pedido entregado${deliverableItemsCount > 0 ? ` (${deliverableItemsCount})` : ''}`}
+        </button>
         <RequestPaymentButton
-          disabled={orderWaitingPayment || activeOrder.status === 'PAID'}
+          disabled={activeOrder.status === 'PAID'}
           isRequesting={isRequestingPayment}
           onRequest={onRequestBill}
         />
@@ -534,7 +644,8 @@ const orderItemGroups: Array<{ key: string; label: string; statuses: OrderItemSt
   { key: 'pending', label: 'Pendientes de enviar', statuses: ['PENDING'] },
   { key: 'sent', label: 'Enviados a cocina', statuses: ['SENT'] },
   { key: 'preparing', label: 'En preparacion', statuses: ['PREPARING'] },
-  { key: 'ready', label: 'Listos', statuses: ['READY', 'SERVED'] },
+  { key: 'ready', label: 'Listos para entregar', statuses: ['READY'] },
+  { key: 'served', label: 'Entregados', statuses: ['SERVED'] },
   { key: 'cancelled', label: 'Cancelados', statuses: ['CANCELLED'] }
 ];
 
@@ -565,6 +676,35 @@ export function ProductCategoryTabs({
 
 export const MenuCategoryTabs = ProductCategoryTabs;
 
+export function ProductSubcategoryTabs({
+  subcategories,
+  selectedSubcategoryId,
+  onSelectSubcategory
+}: {
+  subcategories: MenuCategory[];
+  selectedSubcategoryId: string;
+  onSelectSubcategory: (subcategoryId: string) => void;
+}) {
+  if (subcategories.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="subcategory-tabs">
+      {subcategories.map((subcategory) => (
+        <button
+          className={subcategory.id === selectedSubcategoryId ? 'active' : ''}
+          key={subcategory.id}
+          type="button"
+          onClick={() => onSelectSubcategory(subcategory.id)}
+        >
+          {subcategory.name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function MenuProductCard({
   isActive,
   canQuickAdd,
@@ -580,11 +720,19 @@ export function MenuProductCard({
   onQuickAdd: (item: MenuItem) => void;
   onSelect: (item: MenuItem) => void;
 }) {
+  const visual = productVisualFor(item);
+
   return (
     <article className={isActive ? 'product-card active' : 'product-card'}>
       <button className="product-card-main" type="button" onClick={() => onSelect(item)}>
-        <strong>{item.name}</strong>
-        <span>{item.description}</span>
+        <span
+          aria-hidden="true"
+          className="product-photo"
+          style={{ backgroundImage: `url("${visual}")` }}
+        />
+        <span className="product-code">Inv. {shortProductCode(item.id)}</span>
+        <strong title={item.name}>{item.name}</strong>
+        <span className="product-description">{item.description || 'Producto disponible para venta.'}</span>
         <em>{money(item.price)}</em>
       </button>
       <button
@@ -604,27 +752,23 @@ export function AddProductToOrderModal({
   modifiers,
   notes,
   quantity,
-  quickNotes,
   savingAction,
   selectedModifierIds,
   onAdd,
   onNotesChange,
   onQuantityChange,
-  onToggleModifier,
-  onUseQuickNote
+  onToggleModifier
 }: {
   canAdd: boolean;
   modifiers: Modifier[];
   notes: string;
   quantity: number;
-  quickNotes: string[];
   savingAction: string;
   selectedModifierIds: string[];
   onAdd: (event: FormEvent<HTMLFormElement>) => void;
   onNotesChange: (notes: string) => void;
   onQuantityChange: (quantity: number) => void;
   onToggleModifier: (modifierId: string) => void;
-  onUseQuickNote: (note: string) => void;
 }) {
   return (
     <form className="add-form" onSubmit={onAdd}>
@@ -639,35 +783,31 @@ export function AddProductToOrderModal({
           />
         </label>
         <label>
-          Notas
+          Preparacion / notas del plato
           <input
             value={notes}
             onChange={(event) => onNotesChange(event.target.value)}
-            placeholder="sin cebolla, sin hielo"
+            placeholder="Ej: carne 3/4, termino medio, pasta con extra queso, bebida con hielo"
           />
         </label>
       </div>
-      <div className="quick-notes">
-        {quickNotes.map((note) => (
-          <button key={note} type="button" onClick={() => onUseQuickNote(note)}>
-            {note}
-          </button>
-        ))}
-      </div>
 
-      <div className="modifier-list">
-        {modifiers.map((modifier) => (
-          <label key={modifier.id}>
-            <input
-              checked={selectedModifierIds.includes(modifier.id)}
-              type="checkbox"
-              onChange={() => onToggleModifier(modifier.id)}
-            />
-            <span>{modifier.name}</span>
-            <em>{modifier.price > 0 ? money(modifier.price) : 'Sin costo'}</em>
-          </label>
-        ))}
-      </div>
+      {modifiers.length > 0 && (
+        <div className="modifier-list">
+          <strong className="modifier-list-title">Adicionales disponibles para este producto</strong>
+          {modifiers.map((modifier) => (
+            <label key={modifier.id}>
+              <input
+                checked={selectedModifierIds.includes(modifier.id)}
+                type="checkbox"
+                onChange={() => onToggleModifier(modifier.id)}
+              />
+              <span>{modifier.name}</span>
+              <em>{modifier.price > 0 ? money(modifier.price) : 'Sin costo'}</em>
+            </label>
+          ))}
+        </div>
+      )}
       <Button disabled={!canAdd || savingAction === 'add-product'}>
         {savingAction === 'add-product' ? 'Agregando...' : 'Agregar producto'}
       </Button>
@@ -747,4 +887,67 @@ function itemTotal(item: OrderItem) {
 
 function money(value: number) {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(value);
+}
+
+function shortProductCode(value: string) {
+  return value.replaceAll('-', '').slice(0, 5).toUpperCase() || 'POS';
+}
+
+function productVisualFor(item: MenuItem) {
+  if (item.imageUrl) {
+    return item.imageUrl;
+  }
+
+  const lowerName = `${item.name} ${item.description}`.toLowerCase();
+  const palette = productPalette(lowerName);
+  const initials = item.name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join('') || 'POS';
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 210">
+      <defs>
+        <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+          <stop offset="0" stop-color="${palette[0]}"/>
+          <stop offset="1" stop-color="${palette[1]}"/>
+        </linearGradient>
+        <radialGradient id="plate" cx="50%" cy="46%" r="48%">
+          <stop offset="0" stop-color="#ffffff"/>
+          <stop offset="0.58" stop-color="#f8fafc"/>
+          <stop offset="1" stop-color="#d8e0dd"/>
+        </radialGradient>
+      </defs>
+      <rect width="320" height="210" fill="url(#bg)"/>
+      <circle cx="160" cy="106" r="76" fill="url(#plate)" opacity="0.96"/>
+      <circle cx="160" cy="106" r="52" fill="${palette[2]}" opacity="0.92"/>
+      <ellipse cx="132" cy="92" rx="38" ry="18" fill="${palette[3]}" opacity="0.9"/>
+      <ellipse cx="184" cy="124" rx="43" ry="20" fill="${palette[4]}" opacity="0.88"/>
+      <circle cx="204" cy="82" r="13" fill="#fef3c7" opacity="0.9"/>
+      <text x="160" y="118" text-anchor="middle" font-family="Arial, sans-serif" font-size="34" font-weight="800" fill="#ffffff">${initials}</text>
+    </svg>
+  `.trim();
+
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
+function productPalette(value: string) {
+  if (value.includes('pollo') || value.includes('chicken')) {
+    return ['#fef3c7', '#f59e0b', '#d97706', '#fde68a', '#92400e'];
+  }
+
+  if (value.includes('carne') || value.includes('res') || value.includes('costilla') || value.includes('bbq')) {
+    return ['#fee2e2', '#991b1b', '#7f1d1d', '#f97316', '#451a03'];
+  }
+
+  if (value.includes('pasta') || value.includes('arroz') || value.includes('ensalada')) {
+    return ['#dcfce7', '#16a34a', '#15803d', '#fde68a', '#65a30d'];
+  }
+
+  if (value.includes('bebida') || value.includes('jugo') || value.includes('limonada')) {
+    return ['#dbeafe', '#0284c7', '#0e7490', '#67e8f9', '#0369a1'];
+  }
+
+  return ['#ccfbf1', '#0f766e', '#115e59', '#f59e0b', '#134e4a'];
 }

@@ -189,7 +189,15 @@ export function useAuth() {
   return context;
 }
 
-export function AuthGate({ allowedRoles, children }: { allowedRoles: UserRole[]; children: ReactNode }) {
+export function AuthGate({
+  allowedRoles,
+  children,
+  unauthorizedMessage = 'No tienes permiso para entrar a esta seccion.'
+}: {
+  allowedRoles: UserRole[];
+  children: ReactNode;
+  unauthorizedMessage?: string;
+}) {
   const router = useRouter();
   const { hasRole, isReady, user } = useAuth();
 
@@ -215,7 +223,7 @@ export function AuthGate({ allowedRoles, children }: { allowedRoles: UserRole[];
     return (
       <main className="auth-loading">
         <h1>403 - Sin permiso</h1>
-        <p>No tienes permiso para entrar a esta seccion.</p>
+        <p>{unauthorizedMessage}</p>
         <button type="button" onClick={() => router.replace(routeForRole(user.role))}>
           Volver a mi panel
         </button>
